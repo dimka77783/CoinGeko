@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
 """
-Обновление OHLC данных для монет возрастом от 2 до 60 дней
+Асинхронный обновлятор OHLC данных для криптовалют
+Получает OHLC данные через прямой API CoinGecko без дубликатов
 """
-import urllib.request
-import json
-import os
-from datetime import datetime, timedelta
-import time
-import ssl
+
+import asyncio
+import aiohttp
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import sys
+import logging
+from datetime import datetime, timedelta, timezone
+import os
+import time
+from typing import List, Dict, Optional, Tuple
 
-# Настройки
-API_BASE = "https://api.coingecko.com/api/v3"
-MAX_AGE_DAYS = 60
-MIN_AGE_DAYS = 1
-BATCH_SIZE = 10  # Обработка пакетами
+# Настройка логирования
+log_level = logging.DEBUG if os.environ.get('DEBUG', '').lower() == 'true' else logging.INFO
+logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Задержки
-DELAYS = {
-    'between_coins': 5,
-    'before_api': 2,
-    'rate_limit': 60
-}
-
-# База данных
+# Константы
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': os.environ.get('DB_PORT', '5432'),
@@ -34,247 +28,513 @@ DB_CONFIG = {
     'password': os.environ.get('DB_PASSWORD', 'crypto_password')
 }
 
+# API настройки
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+OHLC_ENDPOINT = f"{COINGECKO_BASE_URL}/coins/{{coin_id}}/ohlc"
+
+# Параметры обновления
+MAX_CONCURRENT_REQUESTS = 2
+REQUEST_DELAY = 5
+RETRY_DELAY = 60
+MAX_RETRIES = 3
+DAYS_TO_FETCH = 14  # Получаем 14 дней данных
+MAX_AGE_DAYS = 60  # Не обновлять монеты старше 60 дней
+MIN_AGE_DAYS = 2  # Не обновлять монеты младше 1 дня
+
+# Семафор для контроля параллельных запросов
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+# Счетчики ошибок
+error_counter = {
+    '429': 0,
+    '404': 0,
+    'network': 0
+}
+
 
 def get_db_connection():
-    """Подключение к БД"""
+    """Создает подключение к БД"""
     try:
-        return psycopg2.connect(**DB_CONFIG)
+        conn = psycopg2.connect(**DB_CONFIG)
+        return conn
     except Exception as e:
-        print(f"❌ Ошибка подключения к БД: {e}")
+        logger.error(f"❌ Ошибка подключения к БД: {e}")
         return None
 
 
-def create_ssl_context():
-    """SSL контекст"""
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
+def get_coins_for_update():
+    """Получает список монет для обновления OHLC"""
+    conn = get_db_connection()
+    if not conn:
+        return []
 
-
-def get_coins_for_update(conn):
-    """Получает список монет для обновления"""
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-    query = """
-    SELECT 
-        c.id,
-        c.name,
-        c.symbol,
-        c.coin_gecko_id,
-        c.added_date,
-        c.ohlc_table_name,
-        CURRENT_DATE - c.added_date as age_days,
-        c.last_updated_at,
-        COALESCE(
-            EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.last_updated_at))/3600,
-            999
-        ) as hours_since_update
-    FROM cryptocurrencies c
-    WHERE c.added_date BETWEEN CURRENT_DATE - INTERVAL '%s days' 
-                          AND CURRENT_DATE - INTERVAL '%s days'
-    AND c.coin_gecko_id IS NOT NULL
-    AND c.ohlc_table_name IS NOT NULL
-    ORDER BY hours_since_update DESC
-    """
-
-    cursor.execute(query, (MAX_AGE_DAYS, MIN_AGE_DAYS))
-    coins = cursor.fetchall()
-    cursor.close()
-
-    # Фильтруем монеты, которые обновлялись недавно
-    filtered = []
-    for coin in coins:
-        if coin['hours_since_update'] > 4:  # Обновляем не чаще раз в 4 часа
-            filtered.append(coin)
-
-    return filtered
-
-
-def fetch_ohlc(coin_id, days=30):
-    """Получает OHLC данные"""
-    url = f"{API_BASE}/coins/{coin_id}/ohlc?vs_currency=usd&days={days}"
-
-    time.sleep(DELAYS['before_api'])
-
     try:
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', 'Mozilla/5.0')
-        req.add_header('Accept', 'application/json')
+        query = """
+        SELECT 
+            id,
+            name,
+            symbol,
+            coin_gecko_id,
+            added_date,
+            ohlc_table_name,
+            EXTRACT(EPOCH FROM (NOW() - added_date::timestamp))/86400 as days_since_listing
+        FROM cryptocurrencies
+        WHERE 
+            -- Есть CoinGecko ID
+            coin_gecko_id IS NOT NULL 
+            AND coin_gecko_id != ''
+            -- Монета старше MIN_AGE_DAYS
+            AND added_date::timestamp < NOW() - INTERVAL '%s days'
+            -- Монета младше MAX_AGE_DAYS
+            AND added_date::timestamp > NOW() - INTERVAL '%s days'
+            -- Есть таблица OHLC
+            AND ohlc_table_name IS NOT NULL
+        ORDER BY added_date DESC
+        LIMIT 50
+        """
 
-        context = create_ssl_context()
-        response = urllib.request.urlopen(req, context=context, timeout=20)
-        data = json.loads(response.read().decode('utf-8'))
+        cursor.execute(query, (MIN_AGE_DAYS, MAX_AGE_DAYS))
+        coins = cursor.fetchall()
 
-        if data:
-            ohlc_data = []
-            for candle in data:
-                if len(candle) >= 5:
-                    timestamp = candle[0]
-                    dt = datetime.fromtimestamp(timestamp / 1000)
+        logger.info(f"📊 Найдено {len(coins)} монет для обновления")
+        return coins
 
-                    ohlc_data.append({
-                        'timestamp': timestamp,
-                        'datetime': dt,
-                        'date': dt.date(),
-                        'time': dt.time(),
-                        'open': candle[1],
-                        'high': candle[2],
-                        'low': candle[3],
-                        'close': candle[4]
-                    })
-
-            return ohlc_data
-
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            print(f"    ⚠️ Rate limit, ожидание {DELAYS['rate_limit']} сек...")
-            time.sleep(DELAYS['rate_limit'])
-        else:
-            print(f"    ❌ HTTP ошибка {e.code}")
     except Exception as e:
-        print(f"    ❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка при получении монет: {e}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+
+async def fetch_ohlc_data(session: aiohttp.ClientSession, coin_id: str) -> Optional[List[Dict]]:
+    """Получает OHLC данные с CoinGecko API"""
+
+    if not coin_id or not coin_id.strip():
+        logger.error("❌ Пустой coin_id")
+        return None
+
+    coin_id = coin_id.strip()
+    url = OHLC_ENDPOINT.format(coin_id=coin_id)
+
+    params = {
+        'vs_currency': 'usd',
+        'days': DAYS_TO_FETCH
+    }
+
+    headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+    }
+
+    logger.debug(f"🌐 Запрос OHLC: {url} (days={DAYS_TO_FETCH})")
+
+    async with semaphore:
+        for attempt in range(MAX_RETRIES):
+            try:
+                await asyncio.sleep(REQUEST_DELAY)
+
+                async with session.get(url, params=params, headers=headers, timeout=30) as response:
+
+                    if response.status == 200:
+                        data = await response.json()
+
+                        if data and isinstance(data, list):
+                            ohlc_list = []
+
+                            for item in data:
+                                if len(item) >= 5:
+                                    timestamp = item[0]
+                                    dt = datetime.fromtimestamp(timestamp / 1000)
+
+                                    ohlc_list.append({
+                                        'timestamp': timestamp,
+                                        'datetime': dt,
+                                        'date': dt.date(),
+                                        'time': dt.time(),
+                                        'open': float(item[1]),
+                                        'high': float(item[2]),
+                                        'low': float(item[3]),
+                                        'close': float(item[4])
+                                    })
+
+                            logger.info(f"✅ Получено {len(ohlc_list)} OHLC записей для {coin_id}")
+                            error_counter['429'] = max(0, error_counter['429'] - 1)
+                            return ohlc_list
+
+                        else:
+                            logger.warning(f"⚠️ Пустой ответ для {coin_id}")
+                            return []
+
+                    elif response.status == 404:
+                        error_counter['404'] += 1
+                        logger.error(f"❌ Монета не найдена: {coin_id}")
+                        return None
+
+                    elif response.status == 429:
+                        error_counter['429'] += 1
+                        retry_after = int(response.headers.get('Retry-After', RETRY_DELAY))
+                        logger.warning(
+                            f"⚠️ Rate limit для {coin_id} (попытка {attempt + 1}/{MAX_RETRIES}), ожидание {retry_after} сек")
+                        await asyncio.sleep(retry_after)
+
+                    else:
+                        text = await response.text()
+                        logger.error(f"❌ HTTP {response.status} для {coin_id}: {text[:200]}")
+                        break
+
+            except asyncio.TimeoutError:
+                error_counter['network'] += 1
+                logger.warning(f"⏱️ Таймаут для {coin_id} (попытка {attempt + 1}/{MAX_RETRIES})")
+
+            except Exception as e:
+                error_counter['network'] += 1
+                logger.error(f"❌ Ошибка для {coin_id}: {e}")
+
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(10 * (attempt + 1))
 
     return None
 
 
-def save_ohlc(conn, table_name, ohlc_data):
-    """Сохраняет OHLC в таблицу"""
+def save_ohlc_to_db(coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
+    """Сохраняет OHLC данные в БД без дубликатов"""
+
+    if not ohlc_data:
+        return 0, 0
+
+    conn = get_db_connection()
+    if not conn:
+        return 0, 0
+
     cursor = conn.cursor()
-    saved = 0
+    table_name = coin_info['ohlc_table_name']
+
+    # Получаем timestamp даты листинга
+    if isinstance(coin_info['added_date'], str):
+        listing_date = datetime.strptime(coin_info['added_date'], '%Y-%m-%d')
+    else:
+        listing_date = datetime.combine(coin_info['added_date'], datetime.min.time())
+
+    listed_timestamp = listing_date.timestamp() * 1000
+
+    saved_count = 0
+    skipped_count = 0
 
     try:
-        # Получаем существующие timestamps
-        cursor.execute(f"SELECT timestamp FROM {table_name}")
-        existing = set(row[0] for row in cursor.fetchall())
+        # Проверяем существование таблицы
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = %s
+            )
+        """, (table_name,))
 
-        # Сохраняем только новые
-        for candle in ohlc_data:
-            if candle['timestamp'] not in existing:
+        if not cursor.fetchone()[0]:
+            logger.error(f"❌ Таблица {table_name} не существует")
+            return 0, 0
+
+        for ohlc in ohlc_data:
+            # Фильтрация данных
+
+            # 1. Проверяем, что данные не старше даты листинга
+            if ohlc['timestamp'] < listed_timestamp:
+                skipped_count += 1
+                continue
+
+            # 2. Проверяем, что данные не из будущего
+            if ohlc['timestamp'] > time.time() * 1000:
+                skipped_count += 1
+                continue
+
+            # 3. Проверяем корректность OHLC
+            if (ohlc['high'] < ohlc['low'] or
+                    ohlc['high'] < ohlc['open'] or
+                    ohlc['high'] < ohlc['close'] or
+                    ohlc['low'] > ohlc['open'] or
+                    ohlc['low'] > ohlc['close']):
+                skipped_count += 1
+                continue
+
+            # 4. Проверяем на разумные значения
+            prices = [ohlc['open'], ohlc['high'], ohlc['low'], ohlc['close']]
+            if any(p <= 0 for p in prices):
+                skipped_count += 1
+                continue
+
+            try:
+                # Вставляем с ON CONFLICT DO NOTHING для избежания дубликатов
                 cursor.execute(f"""
-                    INSERT INTO {table_name} 
+                    INSERT INTO "{table_name}" 
                     (timestamp, datetime, date, time, open, high, low, close)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (timestamp) DO NOTHING
                 """, (
-                    candle['timestamp'], candle['datetime'],
-                    candle['date'], candle['time'],
-                    candle['open'], candle['high'],
-                    candle['low'], candle['close']
+                    ohlc['timestamp'],
+                    ohlc['datetime'],
+                    ohlc['date'],
+                    ohlc['time'],
+                    ohlc['open'],
+                    ohlc['high'],
+                    ohlc['low'],
+                    ohlc['close']
                 ))
-                saved += 1
 
-        # Обновляем last_updated_at
-        cursor.execute("""
-            UPDATE cryptocurrencies 
-            SET last_updated_at = CURRENT_TIMESTAMP 
-            WHERE ohlc_table_name = %s
-        """, (table_name,))
+                if cursor.rowcount > 0:
+                    saved_count += 1
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка вставки записи: {e}")
+                skipped_count += 1
 
         conn.commit()
 
+        if skipped_count > 0:
+            logger.debug(f"⚠️ Пропущено записей: {skipped_count}")
+
+        return saved_count, skipped_count
+
     except Exception as e:
-        print(f"    ❌ Ошибка сохранения: {e}")
+        logger.error(f"❌ Ошибка сохранения в {table_name}: {e}")
         conn.rollback()
+        return 0, 0
     finally:
         cursor.close()
-
-    return saved
-
-
-def print_stats(conn):
-    """Выводит статистику"""
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT 
-            COUNT(*) as total,
-            COUNT(CASE WHEN age < 60 THEN 1 END) as active,
-            COUNT(CASE WHEN age BETWEEN 2 AND 60 THEN 1 END) as need_update
-        FROM (
-            SELECT CURRENT_DATE - added_date as age
-            FROM cryptocurrencies
-        ) t
-    """)
-
-    stats = cursor.fetchone()
-    cursor.close()
-
-    print(f"\n📊 Статистика БД:")
-    print(f"  Всего монет: {stats[0]}")
-    print(f"  Активных (<60 дней): {stats[1]}")
-    print(f"  Требуют обновления: {stats[2]}")
+        conn.close()
 
 
-def main():
+def get_table_stats(table_name: str) -> Dict:
+    """Получает статистику по таблице OHLC"""
+    conn = get_db_connection()
+    if not conn:
+        return {}
+
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        cursor.execute(f"""
+            SELECT 
+                COUNT(*) as total_records,
+                MIN(datetime) as first_record,
+                MAX(datetime) as last_record
+            FROM "{table_name}"
+        """)
+
+        result = cursor.fetchone()
+        return dict(result) if result else {}
+
+    except Exception as e:
+        logger.debug(f"Ошибка получения статистики для {table_name}: {e}")
+        return {}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+async def update_coin_ohlc(session: aiohttp.ClientSession, coin: Dict) -> bool:
+    """Обновляет OHLC данные для одной монеты"""
+
+    name = coin['name']
+    symbol = coin['symbol']
+    coin_id = coin['coin_gecko_id']
+    days_since_listing = coin.get('days_since_listing', 0)
+
+    logger.info(f"\n🔄 Обновление {name} ({symbol})")
+    logger.info(f"  📅 Возраст: {days_since_listing:.1f} дней")
+    logger.info(f"  🆔 CoinGecko ID: {coin_id}")
+
+    # Получаем текущую статистику таблицы
+    table_stats = get_table_stats(coin['ohlc_table_name'])
+
+    if table_stats:
+        logger.info(f"  📊 Текущих записей: {table_stats.get('total_records', 0)}")
+        if table_stats.get('last_record'):
+            logger.info(f"  📅 Последняя запись: {table_stats['last_record']}")
+
+    # Получаем OHLC данные
+    ohlc_data = await fetch_ohlc_data(session, coin_id)
+
+    if ohlc_data is None:
+        logger.error(f"  ❌ Не удалось получить данные")
+        return False
+
+    if not ohlc_data:
+        logger.warning(f"  ⚠️ Нет OHLC данных")
+        return False
+
+    # Сохраняем в БД
+    saved_count, skipped_count = save_ohlc_to_db(coin, ohlc_data)
+
+    # Получаем обновленную статистику
+    new_stats = get_table_stats(coin['ohlc_table_name'])
+
+    if saved_count > 0:
+        logger.info(f"  ✅ Сохранено новых записей: {saved_count}")
+    else:
+        logger.info(f"  ℹ️ Нет новых данных (все записи уже существуют)")
+
+    if new_stats:
+        logger.info(f"  📊 Итого записей: {new_stats.get('total_records', 0)}")
+
+    return True
+
+
+async def update_batch(session: aiohttp.ClientSession, coins: List[Dict]) -> Tuple[int, int]:
+    """Обновляет батч монет"""
+
+    successful = 0
+    failed = 0
+
+    tasks = [update_coin_ohlc(session, coin) for coin in coins]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"❌ Ошибка в задаче для {coins[i]['symbol']}: {result}")
+            failed += 1
+        elif result:
+            successful += 1
+        else:
+            failed += 1
+
+    return successful, failed
+
+
+def get_db_stats():
+    """Получает общую статистику БД"""
+    conn = get_db_connection()
+    if not conn:
+        return {}
+
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Общее количество монет
+        cursor.execute("SELECT COUNT(*) as total FROM cryptocurrencies")
+        total_coins = cursor.fetchone()['total']
+
+        # Монеты с CoinGecko ID
+        cursor.execute("""
+            SELECT COUNT(*) as with_id 
+            FROM cryptocurrencies 
+            WHERE coin_gecko_id IS NOT NULL AND coin_gecko_id != ''
+        """)
+        with_id = cursor.fetchone()['with_id']
+
+        # Активные монеты (младше MAX_AGE_DAYS)
+        cursor.execute("""
+            SELECT COUNT(*) as active 
+            FROM cryptocurrencies 
+            WHERE added_date::timestamp > NOW() - INTERVAL '%s days'
+            AND coin_gecko_id IS NOT NULL AND coin_gecko_id != ''
+        """, (MAX_AGE_DAYS,))
+        active_coins = cursor.fetchone()['active']
+
+        # Монеты с OHLC таблицами
+        cursor.execute("""
+            SELECT COUNT(*) as with_ohlc
+            FROM cryptocurrencies c
+            WHERE c.ohlc_table_name IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_name = c.ohlc_table_name
+            )
+        """)
+        with_ohlc = cursor.fetchone()['with_ohlc']
+
+        return {
+            'total_coins': total_coins,
+            'with_id': with_id,
+            'active_coins': active_coins,
+            'with_ohlc': with_ohlc
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики: {e}")
+        return {}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+async def main():
+    """Основная функция обновления"""
     print("=" * 60)
     print("🔄 ОБНОВЛЕНИЕ OHLC ДАННЫХ")
     print(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"API URL: {OHLC_ENDPOINT}")
+    print(f"Период данных: {DAYS_TO_FETCH} дней")
+    print(f"Макс. одновременных запросов: {MAX_CONCURRENT_REQUESTS}")
+    print(f"Задержка между запросами: {REQUEST_DELAY} сек")
     print("=" * 60)
 
-    # Подключение к БД
-    conn = get_db_connection()
-    if not conn:
-        sys.exit(1)
-
-    # Статистика
-    print_stats(conn)
+    # Получаем и показываем статистику
+    stats = get_db_stats()
+    if stats:
+        print("\n📊 Статистика БД:")
+        print(f"  Всего монет: {stats.get('total_coins', 0)}")
+        print(f"  С CoinGecko ID: {stats.get('with_id', 0)}")
+        print(f"  Активных (<{MAX_AGE_DAYS} дней): {stats.get('active_coins', 0)}")
+        print(f"  С OHLC таблицами: {stats.get('with_ohlc', 0)}")
 
     # Получаем монеты для обновления
-    coins = get_coins_for_update(conn)
-    print(f"\n🎯 Монет для обновления: {len(coins)}")
+    coins = get_coins_for_update()
 
     if not coins:
-        print("✅ Все монеты актуальны")
-        conn.close()
+        print("\n✅ Нет монет для обновления")
         return
 
-    # Обновляем пакетами
-    success = 0
-    errors = 0
+    print(f"\n🔄 Начинаем обновление {len(coins)} монет...")
 
-    for i in range(0, len(coins), BATCH_SIZE):
-        batch = coins[i:i + BATCH_SIZE]
-        batch_num = i // BATCH_SIZE + 1
-        total_batches = (len(coins) + BATCH_SIZE - 1) // BATCH_SIZE
+    # Создаем сессию
+    timeout = aiohttp.ClientTimeout(total=60, connect=15)
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
 
-        print(f"\n📦 Пакет {batch_num}/{total_batches}")
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
 
-        for j, coin in enumerate(batch):
-            if j > 0:
-                time.sleep(DELAYS['between_coins'])
+        # Обрабатываем батчами
+        batch_size = 5
+        total_successful = 0
+        total_failed = 0
 
-            print(f"\n🔄 {coin['name']} ({coin['symbol']})")
-            print(f"   Возраст: {coin['age_days']} дней")
-            print(f"   Обновлено: {coin['hours_since_update']:.1f} часов назад")
+        for i in range(0, len(coins), batch_size):
+            batch = coins[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(coins) + batch_size - 1) // batch_size
 
-            # Получаем OHLC
-            ohlc = fetch_ohlc(coin['coin_gecko_id'])
+            print(f"\n📦 Батч {batch_num}/{total_batches} ({len(batch)} монет)")
 
-            if ohlc:
-                saved = save_ohlc(conn, coin['ohlc_table_name'], ohlc)
-                print(f"   ✅ Сохранено новых: {saved}")
-                success += 1
-            else:
-                print(f"   ❌ Не удалось получить данные")
-                errors += 1
+            successful, failed = await update_batch(session, batch)
+            total_successful += successful
+            total_failed += failed
 
-        # Пауза между пакетами
-        if i + BATCH_SIZE < len(coins):
-            print(f"\n⏸️  Пауза между пакетами...")
-            time.sleep(DELAYS['between_coins'] * 2)
+            # Пауза между батчами
+            if i + batch_size < len(coins):
+                print(f"⏸️ Пауза между батчами...")
+                await asyncio.sleep(15)
 
-    # Итоги
-    print("\n" + "=" * 60)
-    print(f"📊 ИТОГИ:")
-    print(f"  Успешно: {success}")
-    print(f"  Ошибок: {errors}")
-    print(f"  Всего: {success + errors}")
+    # Итоговая статистика
+    print(f"\n📊 Результаты обновления:")
+    print(f"  ✅ Успешно: {total_successful}")
+    print(f"  ❌ Ошибок: {total_failed}")
+    print(f"  📈 Успешность: {total_successful / (total_successful + total_failed) * 100:.1f}%" if (
+                                                                                                              total_successful + total_failed) > 0 else "  📈 Успешность: 0%")
 
-    conn.close()
+    # Статистика ошибок
+    if any(error_counter.values()):
+        print(f"\n⚠️ Ошибки:")
+        if error_counter['429']:
+            print(f"  Rate limit (429): {error_counter['429']}")
+        if error_counter['404']:
+            print(f"  Не найдено (404): {error_counter['404']}")
+        if error_counter['network']:
+            print(f"  Сетевые ошибки: {error_counter['network']}")
+
     print("\n✅ Обновление завершено")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
