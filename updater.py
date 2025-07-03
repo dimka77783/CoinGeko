@@ -39,7 +39,7 @@ RETRY_DELAY = 60
 MAX_RETRIES = 3
 DAYS_TO_FETCH = 14  # Получаем 14 дней данных
 MAX_AGE_DAYS = 60  # Не обновлять монеты старше 60 дней
-MIN_AGE_DAYS = 2  # Не обновлять монеты младше 1 дня
+MIN_AGE_DAYS = 2  # Не обновлять монеты младше 2 дней
 
 # Семафор для контроля параллельных запросов
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -60,6 +60,42 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к БД: {e}")
         return None
+
+
+def ensure_correct_table_name(coin_info: Dict) -> str:
+    """Проверяет и исправляет имя таблицы OHLC"""
+    symbol = coin_info['symbol']
+    current_table_name = coin_info['ohlc_table_name']
+    correct_table_name = f"ohlc_{symbol}"
+
+    # Если имя таблицы содержит дату, исправляем
+    if current_table_name != correct_table_name:
+        logger.warning(f"⚠️ Неправильное имя таблицы: {current_table_name} -> {correct_table_name}")
+
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            try:
+                # Обновляем имя таблицы в cryptocurrencies
+                cursor.execute("""
+                    UPDATE cryptocurrencies 
+                    SET ohlc_table_name = %s 
+                    WHERE id = %s
+                """, (correct_table_name, coin_info['id']))
+
+                conn.commit()
+                logger.info(f"✅ Обновлено имя таблицы в БД")
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка обновления имени таблицы: {e}")
+                conn.rollback()
+            finally:
+                cursor.close()
+                conn.close()
+
+        return correct_table_name
+
+    return current_table_name
 
 
 def get_coins_for_update():
@@ -345,6 +381,10 @@ async def update_coin_ohlc(session: aiohttp.ClientSession, coin: Dict) -> bool:
     logger.info(f"  📅 Возраст: {days_since_listing:.1f} дней")
     logger.info(f"  🆔 CoinGecko ID: {coin_id}")
 
+    # Проверяем и исправляем имя таблицы если нужно
+    correct_table_name = ensure_correct_table_name(coin)
+    coin['ohlc_table_name'] = correct_table_name
+
     # Получаем текущую статистику таблицы
     table_stats = get_table_stats(coin['ohlc_table_name'])
 
@@ -520,7 +560,7 @@ async def main():
     print(f"  ✅ Успешно: {total_successful}")
     print(f"  ❌ Ошибок: {total_failed}")
     print(f"  📈 Успешность: {total_successful / (total_successful + total_failed) * 100:.1f}%" if (
-                                                                                                              total_successful + total_failed) > 0 else "  📈 Успешность: 0%")
+                                                                                                          total_successful + total_failed) > 0 else "  📈 Успешность: 0%")
 
     # Статистика ошибок
     if any(error_counter.values()):
