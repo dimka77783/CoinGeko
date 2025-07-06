@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Асинхронный обновлятор OHLC данных для криптовалют
-Получает OHLC данные через прямой API CoinGecko без дубликатов
+Создает таблицы с именем ohlc_{coin_gecko_id} БЕЗ ДАТ
 """
 
 import asyncio
@@ -9,7 +9,7 @@ import aiohttp
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import os
 import time
 from typing import List, Dict, Optional, Tuple
@@ -62,40 +62,154 @@ def get_db_connection():
         return None
 
 
-def ensure_correct_table_name(coin_info: Dict) -> str:
-    """Проверяет и исправляет имя таблицы OHLC"""
-    symbol = coin_info['symbol']
-    current_table_name = coin_info['ohlc_table_name']
-    correct_table_name = f"ohlc_{symbol}"
+def safe_table_name(coin_gecko_id: str) -> str:
+    """
+    Создает безопасное имя таблицы из coin_gecko_id
+    БЕЗ ДАТЫ - только префикс ohlc_ и обработанный ID
+    """
+    if not coin_gecko_id:
+        return None
 
-    # Если имя таблицы содержит дату, исправляем
+    # Приводим к нижнему регистру
+    safe_name = coin_gecko_id.lower()
+
+    # Заменяем все не-алфавитно-цифровые символы на подчеркивание
+    safe_name = ''.join(c if c.isalnum() else '_' for c in safe_name)
+
+    # Убираем множественные подчеркивания
+    while '__' in safe_name:
+        safe_name = safe_name.replace('__', '_')
+
+    # Убираем подчеркивания в начале и конце
+    safe_name = safe_name.strip('_')
+
+    # Ограничиваем длину (PostgreSQL максимум 63 символа)
+    if len(safe_name) > 50:  # Оставляем место для префикса
+        safe_name = safe_name[:50]
+
+    # Добавляем префикс
+    return f"ohlc_{safe_name}"
+
+
+def create_ohlc_table(table_name: str) -> bool:
+    """Создает таблицу OHLC если не существует"""
+    if not table_name:
+        logger.error("❌ Пустое имя таблицы")
+        return False
+
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    cursor = conn.cursor()
+    try:
+        # Проверяем существование таблицы
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = %s
+            )
+        """, (table_name,))
+
+        if cursor.fetchone()[0]:
+            logger.debug(f"ℹ️ Таблица {table_name} уже существует")
+            return True
+
+        # Создаем таблицу
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS "{table_name}" (
+                id SERIAL PRIMARY KEY,
+                timestamp BIGINT NOT NULL UNIQUE,
+                datetime TIMESTAMP NOT NULL,
+                date DATE NOT NULL,
+                time TIME NOT NULL,
+                open DECIMAL(20, 8) NOT NULL,
+                high DECIMAL(20, 8) NOT NULL,
+                low DECIMAL(20, 8) NOT NULL,
+                close DECIMAL(20, 8) NOT NULL,
+                volume DECIMAL(20, 8) DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Создаем индексы
+        cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_{table_name}_timestamp ON "{table_name}"(timestamp)')
+        cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_{table_name}_datetime ON "{table_name}"(datetime)')
+        cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_{table_name}_date ON "{table_name}"(date)')
+
+        conn.commit()
+        logger.info(f"✅ Создана таблица {table_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания таблицы {table_name}: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_coin_table_name(coin_id: int, new_table_name: str) -> bool:
+    """Обновляет имя таблицы в записи криптовалюты"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE cryptocurrencies 
+            SET ohlc_table_name = %s 
+            WHERE id = %s
+        """, (new_table_name, coin_id))
+
+        conn.commit()
+        logger.info(f"✅ Обновлено имя таблицы для coin_id={coin_id}: {new_table_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления имени таблицы: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def ensure_table_for_coin(coin_info: Dict) -> Optional[str]:
+    """
+    Проверяет и создает таблицу для монеты
+    Возвращает имя таблицы или None при ошибке
+    """
+    coin_id = coin_info['id']
+    coin_gecko_id = coin_info.get('coin_gecko_id')
+    current_table_name = coin_info.get('ohlc_table_name')
+
+    if not coin_gecko_id:
+        logger.error(f"❌ Отсутствует coin_gecko_id для {coin_info['symbol']}")
+        return None
+
+    # Генерируем правильное имя таблицы БЕЗ ДАТЫ
+    correct_table_name = safe_table_name(coin_gecko_id)
+
+    if not correct_table_name:
+        logger.error(f"❌ Не удалось сгенерировать имя таблицы для {coin_gecko_id}")
+        return None
+
+    # Логируем для отладки
+    logger.debug(f"📝 coin_gecko_id: {coin_gecko_id} -> table_name: {correct_table_name}")
+
+    # Если имя не совпадает или отсутствует - обновляем
     if current_table_name != correct_table_name:
-        logger.warning(f"⚠️ Неправильное имя таблицы: {current_table_name} -> {correct_table_name}")
+        logger.info(f"📝 Обновление имени таблицы: {current_table_name} -> {correct_table_name}")
+        update_coin_table_name(coin_id, correct_table_name)
 
-        conn = get_db_connection()
-        if conn:
-            cursor = conn.cursor()
-            try:
-                # Обновляем имя таблицы в cryptocurrencies
-                cursor.execute("""
-                    UPDATE cryptocurrencies 
-                    SET ohlc_table_name = %s 
-                    WHERE id = %s
-                """, (correct_table_name, coin_info['id']))
-
-                conn.commit()
-                logger.info(f"✅ Обновлено имя таблицы в БД")
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка обновления имени таблицы: {e}")
-                conn.rollback()
-            finally:
-                cursor.close()
-                conn.close()
-
+    # Создаем таблицу если не существует
+    if create_ohlc_table(correct_table_name):
         return correct_table_name
 
-    return current_table_name
+    return None
 
 
 def get_coins_for_update():
@@ -125,8 +239,6 @@ def get_coins_for_update():
             AND added_date::timestamp < NOW() - INTERVAL '%s days'
             -- Монета младше MAX_AGE_DAYS
             AND added_date::timestamp > NOW() - INTERVAL '%s days'
-            -- Есть таблица OHLC
-            AND ohlc_table_name IS NOT NULL
         ORDER BY added_date DESC
         LIMIT 50
         """
@@ -235,10 +347,10 @@ async def fetch_ohlc_data(session: aiohttp.ClientSession, coin_id: str) -> Optio
     return None
 
 
-def save_ohlc_to_db(coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
+def save_ohlc_to_db(table_name: str, coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
     """Сохраняет OHLC данные в БД без дубликатов"""
 
-    if not ohlc_data:
+    if not ohlc_data or not table_name:
         return 0, 0
 
     conn = get_db_connection()
@@ -246,7 +358,6 @@ def save_ohlc_to_db(coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
         return 0, 0
 
     cursor = conn.cursor()
-    table_name = coin_info['ohlc_table_name']
 
     # Получаем timestamp даты листинга
     if isinstance(coin_info['added_date'], str):
@@ -260,18 +371,6 @@ def save_ohlc_to_db(coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
     skipped_count = 0
 
     try:
-        # Проверяем существование таблицы
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = %s
-            )
-        """, (table_name,))
-
-        if not cursor.fetchone()[0]:
-            logger.error(f"❌ Таблица {table_name} не существует")
-            return 0, 0
-
         for ohlc in ohlc_data:
             # Фильтрация данных
 
@@ -343,6 +442,9 @@ def save_ohlc_to_db(coin_info: Dict, ohlc_data: List[Dict]) -> Tuple[int, int]:
 
 def get_table_stats(table_name: str) -> Dict:
     """Получает статистику по таблице OHLC"""
+    if not table_name:
+        return {}
+
     conn = get_db_connection()
     if not conn:
         return {}
@@ -381,12 +483,19 @@ async def update_coin_ohlc(session: aiohttp.ClientSession, coin: Dict) -> bool:
     logger.info(f"  📅 Возраст: {days_since_listing:.1f} дней")
     logger.info(f"  🆔 CoinGecko ID: {coin_id}")
 
-    # Проверяем и исправляем имя таблицы если нужно
-    correct_table_name = ensure_correct_table_name(coin)
-    coin['ohlc_table_name'] = correct_table_name
+    # Проверяем/создаем таблицу
+    table_name = ensure_table_for_coin(coin)
+    if not table_name:
+        logger.error(f"  ❌ Не удалось создать таблицу")
+        return False
+
+    logger.info(f"  📁 Таблица: {table_name}")
+
+    # Обновляем информацию о таблице в объекте монеты
+    coin['ohlc_table_name'] = table_name
 
     # Получаем текущую статистику таблицы
-    table_stats = get_table_stats(coin['ohlc_table_name'])
+    table_stats = get_table_stats(table_name)
 
     if table_stats:
         logger.info(f"  📊 Текущих записей: {table_stats.get('total_records', 0)}")
@@ -405,10 +514,10 @@ async def update_coin_ohlc(session: aiohttp.ClientSession, coin: Dict) -> bool:
         return False
 
     # Сохраняем в БД
-    saved_count, skipped_count = save_ohlc_to_db(coin, ohlc_data)
+    saved_count, skipped_count = save_ohlc_to_db(table_name, coin, ohlc_data)
 
     # Получаем обновленную статистику
-    new_stats = get_table_stats(coin['ohlc_table_name'])
+    new_stats = get_table_stats(table_name)
 
     if saved_count > 0:
         logger.info(f"  ✅ Сохранено новых записей: {saved_count}")
@@ -502,7 +611,7 @@ def get_db_stats():
 async def main():
     """Основная функция обновления"""
     print("=" * 60)
-    print("🔄 ОБНОВЛЕНИЕ OHLC ДАННЫХ")
+    print("🔄 ОБНОВЛЕНИЕ OHLC ДАННЫХ (БЕЗ ДАТ В ИМЕНАХ ТАБЛИЦ)")
     print(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"API URL: {OHLC_ENDPOINT}")
     print(f"Период данных: {DAYS_TO_FETCH} дней")
@@ -527,6 +636,7 @@ async def main():
         return
 
     print(f"\n🔄 Начинаем обновление {len(coins)} монет...")
+    print("📌 Таблицы будут создаваться БЕЗ ДАТ в именах!")
 
     # Создаем сессию
     timeout = aiohttp.ClientTimeout(total=60, connect=15)
@@ -559,8 +669,8 @@ async def main():
     print(f"\n📊 Результаты обновления:")
     print(f"  ✅ Успешно: {total_successful}")
     print(f"  ❌ Ошибок: {total_failed}")
-    print(f"  📈 Успешность: {total_successful / (total_successful + total_failed) * 100:.1f}%" if (
-                                                                                                          total_successful + total_failed) > 0 else "  📈 Успешность: 0%")
+    if (total_successful + total_failed) > 0:
+        print(f"  📈 Успешность: {total_successful / (total_successful + total_failed) * 100:.1f}%")
 
     # Статистика ошибок
     if any(error_counter.values()):
@@ -573,6 +683,7 @@ async def main():
             print(f"  Сетевые ошибки: {error_counter['network']}")
 
     print("\n✅ Обновление завершено")
+    print("📌 Все таблицы созданы БЕЗ ДАТ в именах!")
     print("=" * 60)
 
 

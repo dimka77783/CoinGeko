@@ -549,27 +549,50 @@ def save_to_database(cryptos: List[Dict]):
                 skipped_count += 1
                 continue
 
+            # ИЗМЕНЕНИЕ: Проверяем существование только по символу
             cursor.execute("""
-                SELECT id, ohlc_table_name, coin_gecko_id, name 
+                SELECT id, ohlc_table_name, coin_gecko_id, name, added_date
                 FROM cryptocurrencies 
-                WHERE symbol = %s AND added_date = %s
-            """, (crypto['symbol'], crypto['added']))
+                WHERE symbol = %s
+            """, (crypto['symbol'],))
 
             existing = cursor.fetchone()
 
             if existing:
-                crypto_id, ohlc_table, existing_coin_id, existing_name = existing
+                crypto_id, ohlc_table, existing_coin_id, existing_name, existing_date = existing
 
+                logger.info(f"  🔄 Монета уже существует: {crypto['name']} ({crypto['symbol']}) от {existing_date}")
+
+                # Обновляем только если есть новая информация
                 updates = []
                 params = []
 
+                # Обновляем coin_gecko_id если его не было
                 if crypto.get('coin_id') and not existing_coin_id:
                     updates.append("coin_gecko_id = %s")
                     params.append(crypto['coin_id'])
+                    logger.info(f"    📝 Обновляем coin_gecko_id: {crypto['coin_id']}")
 
+                # Обновляем имя если было Unknown
                 if crypto['name'] != "Unknown" and existing_name == "Unknown":
                     updates.append("name = %s")
                     params.append(crypto['name'])
+                    logger.info(f"    📝 Обновляем имя: {crypto['name']}")
+
+                # Обновляем цену и другие метрики
+                updates.extend([
+                    "price = %s",
+                    "change_24h = %s",
+                    "market_cap = %s",
+                    "fdv = %s",
+                    "last_updated_at = CURRENT_TIMESTAMP"
+                ])
+                params.extend([
+                    crypto['price'],
+                    crypto['change_24h'],
+                    crypto['market_cap'],
+                    crypto['fdv']
+                ])
 
                 if updates:
                     params.append(crypto_id)
@@ -578,48 +601,55 @@ def save_to_database(cryptos: List[Dict]):
                         SET {', '.join(updates)}
                         WHERE id = %s
                     """, params)
+                    updated_count += 1
 
-                updated_count += 1
+                # Обрабатываем OHLC данные
+                if 'ohlc' in crypto and crypto['ohlc']:
+                    if not ohlc_table and crypto.get('coin_id'):
+                        # Если таблицы нет, но есть coin_id - создадим при следующем запуске updater.py
+                        logger.info(f"    ℹ️ OHLC таблица будет создана updater.py")
+                    elif ohlc_table:
+                        # Сохраняем OHLC если таблица есть
+                        saved_candles = 0
+                        for candle in crypto['ohlc']:
+                            try:
+                                cursor.execute(f"""
+                                    INSERT INTO {ohlc_table} 
+                                    (timestamp, datetime, date, time, open, high, low, close)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (timestamp) DO NOTHING
+                                """, (
+                                    candle['timestamp'], candle['datetime'],
+                                    candle['date'], candle['time'],
+                                    candle['open'], candle['high'],
+                                    candle['low'], candle['close']
+                                ))
+                                if cursor.rowcount > 0:
+                                    saved_candles += 1
+                            except Exception as e:
+                                logger.debug(f"    ⚠️ Ошибка вставки OHLC: {e}")
+
+                        if saved_candles > 0:
+                            ohlc_count += saved_candles
+                            logger.info(f"    📊 Сохранено {saved_candles} новых OHLC свечей")
+
             else:
+                # Новая монета - вставляем
                 cursor.execute("""
                     INSERT INTO cryptocurrencies 
                     (name, symbol, chain, price, change_24h, market_cap, 
                      fdv, added_date, added_raw, coin_gecko_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id, ohlc_table_name
+                    RETURNING id
                 """, (
                     crypto['name'], crypto['symbol'], crypto['chain'],
                     crypto['price'], crypto['change_24h'], crypto['market_cap'],
                     crypto['fdv'], crypto['added'], crypto['added_raw'],
                     crypto.get('coin_id')
                 ))
-                crypto_id, ohlc_table = cursor.fetchone()
+                crypto_id = cursor.fetchone()[0]
                 new_count += 1
-                logger.info(f"  ✅ Добавлена: {crypto['name']} ({crypto['symbol']})")
-
-            if 'ohlc' in crypto and crypto['ohlc'] and ohlc_table:
-                saved_candles = 0
-                for candle in crypto['ohlc']:
-                    try:
-                        cursor.execute(f"""
-                            INSERT INTO {ohlc_table} 
-                            (timestamp, datetime, date, time, open, high, low, close)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (timestamp) DO NOTHING
-                        """, (
-                            candle['timestamp'], candle['datetime'],
-                            candle['date'], candle['time'],
-                            candle['open'], candle['high'],
-                            candle['low'], candle['close']
-                        ))
-                        if cursor.rowcount > 0:
-                            saved_candles += 1
-                    except:
-                        pass
-
-                if saved_candles > 0:
-                    ohlc_count += saved_candles
-                    logger.info(f"  📊 Сохранено {saved_candles} OHLC для {crypto['symbol']}")
+                logger.info(f"  ✅ Добавлена новая монета: {crypto['name']} ({crypto['symbol']})")
 
             conn.commit()
 
@@ -632,7 +662,7 @@ def save_to_database(cryptos: List[Dict]):
 
     logger.info(f"\n📊 Итоги сохранения:")
     logger.info(f"  ✅ Новых монет: {new_count}")
-    logger.info(f"  🔄 Обновлено: {updated_count}")
+    logger.info(f"  🔄 Обновлено существующих: {updated_count}")
     logger.info(f"  📈 OHLC записей: {ohlc_count}")
     logger.info(f"  ⏭️  Пропущено: {skipped_count}")
 
