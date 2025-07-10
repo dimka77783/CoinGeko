@@ -1,4 +1,4 @@
--- Crypto Parser Database Schema with Telegram Support
+-- Crypto Parser Database Schema with Telegram and Social Links Support
 -- БЕЗ ДАТ В ИМЕНАХ ТАБЛИЦ
 
 -- Основная таблица криптовалют
@@ -15,10 +15,20 @@ CREATE TABLE IF NOT EXISTS cryptocurrencies (
     added_raw VARCHAR(100),
     coin_gecko_id VARCHAR(255),
     ohlc_table_name VARCHAR(100),
-    telegram_table_name VARCHAR(100),  -- ДОБАВЛЕНО: имя таблицы с Telegram данными
-    telegram_message_count INTEGER DEFAULT 0,  -- ДОБАВЛЕНО: количество сообщений
-    telegram_channels TEXT[],  -- ДОБАВЛЕНО: список найденных каналов
-    telegram_last_parsed TIMESTAMP,  -- ДОБАВЛЕНО: последний парсинг
+    telegram_table_name VARCHAR(100),  -- имя таблицы с Telegram данными
+    telegram_message_count INTEGER DEFAULT 0,  -- количество сообщений
+    telegram_last_parsed TIMESTAMP,  -- последний парсинг сообщений
+
+    -- Социальные ссылки (добавляется parser_coingecko_social.py)
+    telegram_channels TEXT[],  -- список Telegram каналов
+    twitter_accounts TEXT[],   -- список Twitter аккаунтов
+    discord_links TEXT[],      -- список Discord серверов
+    reddit_communities TEXT[],  -- список Reddit сообществ
+    github_links TEXT[],       -- список GitHub репозиториев
+    official_websites TEXT[],  -- список официальных сайтов
+    instagram_accounts TEXT[], -- список Instagram аккаунтов
+    social_links_updated TIMESTAMP,  -- когда обновлены социальные ссылки
+
     first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(symbol)
@@ -30,7 +40,9 @@ CREATE INDEX IF NOT EXISTS idx_crypto_added_date ON cryptocurrencies(added_date)
 CREATE INDEX IF NOT EXISTS idx_crypto_gecko_id ON cryptocurrencies(coin_gecko_id);
 CREATE INDEX IF NOT EXISTS idx_crypto_ohlc_table ON cryptocurrencies(ohlc_table_name);
 CREATE INDEX IF NOT EXISTS idx_crypto_chain ON cryptocurrencies(chain);
-CREATE INDEX IF NOT EXISTS idx_crypto_telegram_table ON cryptocurrencies(telegram_table_name);  -- ДОБАВЛЕНО
+CREATE INDEX IF NOT EXISTS idx_crypto_telegram_table ON cryptocurrencies(telegram_table_name);
+CREATE INDEX IF NOT EXISTS idx_crypto_market_cap ON cryptocurrencies(market_cap);
+CREATE INDEX IF NOT EXISTS idx_crypto_social_updated ON cryptocurrencies(social_links_updated);
 
 -- Функция для обновления last_updated_at
 CREATE OR REPLACE FUNCTION update_last_updated_at()
@@ -78,7 +90,7 @@ CREATE TABLE IF NOT EXISTS telegram_SYMBOL (
 );
 */
 
--- Представление для удобного просмотра с Telegram данными
+-- Представление для удобного просмотра с Telegram и социальными данными
 CREATE OR REPLACE VIEW crypto_stats AS
 SELECT
     c.id,
@@ -91,9 +103,13 @@ SELECT
     CURRENT_DATE - c.first_seen_at::date as days_in_db,
     c.coin_gecko_id,
     c.ohlc_table_name,
-    c.telegram_table_name,  -- ДОБАВЛЕНО
-    c.telegram_message_count,  -- ДОБАВЛЕНО
-    c.telegram_last_parsed,  -- ДОБАВЛЕНО
+    c.telegram_table_name,
+    c.telegram_message_count,
+    c.telegram_last_parsed,
+    array_length(c.telegram_channels, 1) as telegram_channels_count,
+    array_length(c.twitter_accounts, 1) as twitter_accounts_count,
+    array_length(c.official_websites, 1) as websites_count,
+    c.social_links_updated,
     c.last_updated_at,
     CASE
         WHEN c.ohlc_table_name IS NOT NULL THEN
@@ -108,9 +124,48 @@ SELECT
              FROM information_schema.tables
              WHERE table_name = c.telegram_table_name)
         ELSE 0
-    END as telegram_table_exists  -- ДОБАВЛЕНО
+    END as telegram_table_exists
 FROM cryptocurrencies c
 ORDER BY c.first_seen_at DESC;
+
+-- Представление для социальных ссылок
+CREATE OR REPLACE VIEW crypto_social_links AS
+SELECT
+    c.id,
+    c.symbol,
+    c.name,
+    c.telegram_channels,
+    c.twitter_accounts,
+    c.discord_links,
+    c.reddit_communities,
+    c.github_links,
+    c.official_websites,
+    c.instagram_accounts,
+    c.social_links_updated,
+    (
+        COALESCE(array_length(c.telegram_channels, 1), 0) +
+        COALESCE(array_length(c.twitter_accounts, 1), 0) +
+        COALESCE(array_length(c.discord_links, 1), 0) +
+        COALESCE(array_length(c.reddit_communities, 1), 0) +
+        COALESCE(array_length(c.github_links, 1), 0) +
+        COALESCE(array_length(c.official_websites, 1), 0) +
+        COALESCE(array_length(c.instagram_accounts, 1), 0)
+    ) as total_social_links,
+    CASE
+        WHEN c.social_links_updated IS NOT NULL THEN
+            EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.social_links_updated))/3600
+        ELSE NULL
+    END as hours_since_updated
+FROM cryptocurrencies c
+WHERE
+    c.telegram_channels IS NOT NULL OR
+    c.twitter_accounts IS NOT NULL OR
+    c.discord_links IS NOT NULL OR
+    c.reddit_communities IS NOT NULL OR
+    c.github_links IS NOT NULL OR
+    c.official_websites IS NOT NULL OR
+    c.instagram_accounts IS NOT NULL
+ORDER BY total_social_links DESC;
 
 -- Представление для мониторинга Telegram данных
 CREATE OR REPLACE VIEW telegram_stats AS
@@ -152,6 +207,29 @@ FROM cryptocurrencies c
 WHERE c.telegram_channels IS NOT NULL
   AND array_length(c.telegram_channels, 1) > 0
 ORDER BY c.telegram_message_count DESC;
+
+-- Представление для криптовалют без социальных ссылок
+CREATE OR REPLACE VIEW crypto_without_social AS
+SELECT
+    c.id,
+    c.symbol,
+    c.name,
+    c.coin_gecko_id,
+    c.added_date,
+    c.market_cap
+FROM cryptocurrencies c
+WHERE
+    c.coin_gecko_id IS NOT NULL AND
+    (
+        c.telegram_channels IS NULL OR array_length(c.telegram_channels, 1) = 0
+    ) AND
+    (
+        c.twitter_accounts IS NULL OR array_length(c.twitter_accounts, 1) = 0
+    ) AND
+    (
+        c.official_websites IS NULL OR array_length(c.official_websites, 1) = 0
+    )
+ORDER BY c.market_cap DESC NULLS LAST;
 
 -- Функция для анализа сообщений
 CREATE OR REPLACE FUNCTION analyze_telegram_message(message_text TEXT)
@@ -199,30 +277,6 @@ BEGIN
     RETURN QUERY SELECT sentiment, mentions_price, mentions_buy, mentions_sell, extracted_price, extracted_percentage;
 END;
 $$ LANGUAGE plpgsql;
-
--- Представление для анализа настроений по монетам
-CREATE OR REPLACE VIEW telegram_sentiment_analysis AS
-WITH sentiment_data AS (
-    SELECT
-        c.symbol,
-        c.name,
-        c.telegram_table_name,
-        'positive' as sentiment,
-        0 as count
-    FROM cryptocurrencies c
-    WHERE c.telegram_table_name IS NOT NULL
-)
-SELECT
-    symbol,
-    name,
-    telegram_table_name,
-    'Analysis pending' as sentiment_summary,
-    0 as total_messages,
-    0 as positive_percent,
-    0 as negative_percent,
-    0 as neutral_percent
-FROM sentiment_data
-GROUP BY symbol, name, telegram_table_name;
 
 -- Функция для получения последних сообщений монеты
 CREATE OR REPLACE FUNCTION get_latest_telegram_messages(
@@ -273,14 +327,64 @@ SELECT
         WHEN name = 'Unknown' THEN 'Неизвестное имя'
         WHEN coin_gecko_id IS NULL THEN 'Нет CoinGecko ID'
         WHEN ohlc_table_name IS NULL AND coin_gecko_id IS NOT NULL THEN 'Нет OHLC таблицы'
-        WHEN telegram_table_name IS NULL THEN 'Нет Telegram данных'
+        WHEN telegram_channels IS NULL OR array_length(telegram_channels, 1) = 0 THEN 'Нет Telegram каналов'
+        WHEN telegram_table_name IS NULL AND telegram_channels IS NOT NULL THEN 'Нет таблицы сообщений'
         WHEN telegram_message_count = 0 AND telegram_table_name IS NOT NULL THEN 'Нет сообщений'
+        WHEN social_links_updated IS NULL AND coin_gecko_id IS NOT NULL THEN 'Социальные ссылки не обновлены'
         ELSE 'OK'
     END as issue
 FROM cryptocurrencies
 WHERE name = 'Unknown'
    OR coin_gecko_id IS NULL
    OR (ohlc_table_name IS NULL AND coin_gecko_id IS NOT NULL)
-   OR telegram_table_name IS NULL
+   OR (telegram_channels IS NULL OR array_length(telegram_channels, 1) = 0)
+   OR (telegram_table_name IS NULL AND telegram_channels IS NOT NULL)
    OR (telegram_message_count = 0 AND telegram_table_name IS NOT NULL)
+   OR (social_links_updated IS NULL AND coin_gecko_id IS NOT NULL)
 ORDER BY added_date DESC;
+
+-- Функция для статистики социальных ссылок
+CREATE OR REPLACE FUNCTION get_social_stats()
+RETURNS TABLE(
+    total_cryptos BIGINT,
+    with_telegram BIGINT,
+    with_twitter BIGINT,
+    with_discord BIGINT,
+    with_reddit BIGINT,
+    with_github BIGINT,
+    with_websites BIGINT,
+    with_any_social BIGINT,
+    avg_links_per_crypto NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        COUNT(*) as total_cryptos,
+        COUNT(CASE WHEN array_length(telegram_channels, 1) > 0 THEN 1 END) as with_telegram,
+        COUNT(CASE WHEN array_length(twitter_accounts, 1) > 0 THEN 1 END) as with_twitter,
+        COUNT(CASE WHEN array_length(discord_links, 1) > 0 THEN 1 END) as with_discord,
+        COUNT(CASE WHEN array_length(reddit_communities, 1) > 0 THEN 1 END) as with_reddit,
+        COUNT(CASE WHEN array_length(github_links, 1) > 0 THEN 1 END) as with_github,
+        COUNT(CASE WHEN array_length(official_websites, 1) > 0 THEN 1 END) as with_websites,
+        COUNT(CASE WHEN
+            array_length(telegram_channels, 1) > 0 OR
+            array_length(twitter_accounts, 1) > 0 OR
+            array_length(discord_links, 1) > 0 OR
+            array_length(reddit_communities, 1) > 0 OR
+            array_length(github_links, 1) > 0 OR
+            array_length(official_websites, 1) > 0 OR
+            array_length(instagram_accounts, 1) > 0
+        THEN 1 END) as with_any_social,
+        ROUND(AVG(
+            COALESCE(array_length(telegram_channels, 1), 0) +
+            COALESCE(array_length(twitter_accounts, 1), 0) +
+            COALESCE(array_length(discord_links, 1), 0) +
+            COALESCE(array_length(reddit_communities, 1), 0) +
+            COALESCE(array_length(github_links, 1), 0) +
+            COALESCE(array_length(official_websites, 1), 0) +
+            COALESCE(array_length(instagram_accounts, 1), 0)
+        ), 2) as avg_links_per_crypto
+    FROM cryptocurrencies
+    WHERE coin_gecko_id IS NOT NULL;
+END;
+$$ LANGUAGE plpgsql;
