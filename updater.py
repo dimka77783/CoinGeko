@@ -2,6 +2,7 @@
 """
 Асинхронный обновлятор OHLC данных для криптовалют
 Создает таблицы с именем ohlc_{coin_gecko_id} БЕЗ ДАТ
+Версия 2: Использует дату первой OHLC записи для определения возраста монеты
 """
 
 import asyncio
@@ -212,6 +213,54 @@ def ensure_table_for_coin(coin_info: Dict) -> Optional[str]:
     return None
 
 
+def get_coin_age_from_ohlc(ohlc_table_name: str) -> Optional[float]:
+    """
+    Получает возраст монеты на основе первой OHLC записи
+    Возвращает возраст в днях или None
+    """
+    if not ohlc_table_name:
+        return None
+
+    conn = get_db_connection()
+    if not conn:
+        return None
+
+    cursor = conn.cursor()
+
+    try:
+        # Проверяем существование таблицы
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = %s
+            )
+        """, (ohlc_table_name,))
+
+        if not cursor.fetchone()[0]:
+            return None
+
+        # Получаем дату первой записи
+        cursor.execute(f"""
+            SELECT MIN(datetime) as first_record
+            FROM "{ohlc_table_name}"
+        """)
+
+        result = cursor.fetchone()
+        if result and result[0]:
+            first_record = result[0]
+            age_days = (datetime.now() - first_record).total_seconds() / 86400
+            return age_days
+
+        return None
+
+    except Exception as e:
+        logger.debug(f"Ошибка получения возраста из OHLC: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_coins_for_update():
     """Получает список монет для обновления OHLC"""
     conn = get_db_connection()
@@ -221,6 +270,7 @@ def get_coins_for_update():
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
+        # Сначала получаем все монеты с CoinGecko ID (БЕЗ LIMIT!)
         query = """
         SELECT 
             id,
@@ -235,19 +285,48 @@ def get_coins_for_update():
             -- Есть CoinGecko ID
             coin_gecko_id IS NOT NULL 
             AND coin_gecko_id != ''
-            -- Монета старше MIN_AGE_DAYS
-            AND added_date::timestamp < NOW() - INTERVAL '%s days'
-            -- Монета младше MAX_AGE_DAYS
-            AND added_date::timestamp > NOW() - INTERVAL '%s days'
         ORDER BY added_date DESC
-        LIMIT 50
         """
 
-        cursor.execute(query, (MIN_AGE_DAYS, MAX_AGE_DAYS))
-        coins = cursor.fetchall()
+        cursor.execute(query)
+        all_coins = cursor.fetchall()
 
-        logger.info(f"📊 Найдено {len(coins)} монет для обновления")
-        return coins
+        # Фильтруем монеты с учетом реального возраста
+        filtered_coins = []
+
+        for coin in all_coins:
+            # Пытаемся получить возраст из OHLC таблицы
+            real_age = get_coin_age_from_ohlc(coin.get('ohlc_table_name'))
+
+            if real_age is not None:
+                # Используем реальный возраст из OHLC
+                coin['real_age_days'] = real_age
+                coin['age_source'] = 'OHLC'
+
+                logger.debug(f"📅 {coin['symbol']}: возраст из OHLC = {real_age:.1f} дней")
+
+                # Проверяем возрастные ограничения
+                if MIN_AGE_DAYS <= real_age <= MAX_AGE_DAYS:
+                    filtered_coins.append(coin)
+                else:
+                    logger.debug(
+                        f"  ⏭️ Пропускаем {coin['symbol']}: возраст {real_age:.1f} вне диапазона [{MIN_AGE_DAYS}, {MAX_AGE_DAYS}]")
+            else:
+                # Если OHLC таблицы нет или она пустая, используем added_date
+                age_from_added = coin['days_since_listing']
+                coin['real_age_days'] = age_from_added
+                coin['age_source'] = 'added_date'
+
+                logger.debug(f"📅 {coin['symbol']}: возраст из added_date = {age_from_added:.1f} дней")
+
+                # Для новых монет без OHLC используем менее строгие ограничения
+                if age_from_added >= 1:  # Минимум 1 день для первого запроса
+                    filtered_coins.append(coin)
+
+        logger.info(f"📊 Найдено {len(filtered_coins)} монет для обновления (из {len(all_coins)} проверенных)")
+
+        # Возвращаем все подходящие монеты без ограничения
+        return filtered_coins
 
     except Exception as e:
         logger.error(f"❌ Ошибка при получении монет: {e}")
@@ -359,13 +438,18 @@ def save_ohlc_to_db(table_name: str, coin_info: Dict, ohlc_data: List[Dict]) -> 
 
     cursor = conn.cursor()
 
-    # Получаем timestamp даты листинга
-    if isinstance(coin_info['added_date'], str):
-        listing_date = datetime.strptime(coin_info['added_date'], '%Y-%m-%d')
+    # Получаем timestamp даты листинга (или первой OHLC записи)
+    # Используем реальный возраст если он есть
+    if 'real_age_days' in coin_info and coin_info.get('age_source') == 'OHLC':
+        # Если возраст из OHLC, не фильтруем по дате листинга
+        listed_timestamp = 0
     else:
-        listing_date = datetime.combine(coin_info['added_date'], datetime.min.time())
-
-    listed_timestamp = listing_date.timestamp() * 1000
+        # Иначе используем added_date
+        if isinstance(coin_info['added_date'], str):
+            listing_date = datetime.strptime(coin_info['added_date'], '%Y-%m-%d')
+        else:
+            listing_date = datetime.combine(coin_info['added_date'], datetime.min.time())
+        listed_timestamp = listing_date.timestamp() * 1000
 
     saved_count = 0
     skipped_count = 0
@@ -374,8 +458,8 @@ def save_ohlc_to_db(table_name: str, coin_info: Dict, ohlc_data: List[Dict]) -> 
         for ohlc in ohlc_data:
             # Фильтрация данных
 
-            # 1. Проверяем, что данные не старше даты листинга
-            if ohlc['timestamp'] < listed_timestamp:
+            # 1. Проверяем, что данные не старше даты листинга (только если используем added_date)
+            if listed_timestamp > 0 and ohlc['timestamp'] < listed_timestamp:
                 skipped_count += 1
                 continue
 
@@ -477,10 +561,11 @@ async def update_coin_ohlc(session: aiohttp.ClientSession, coin: Dict) -> bool:
     name = coin['name']
     symbol = coin['symbol']
     coin_id = coin['coin_gecko_id']
-    days_since_listing = coin.get('days_since_listing', 0)
+    real_age = coin.get('real_age_days', coin.get('days_since_listing', 0))
+    age_source = coin.get('age_source', 'added_date')
 
     logger.info(f"\n🔄 Обновление {name} ({symbol})")
-    logger.info(f"  📅 Возраст: {days_since_listing:.1f} дней")
+    logger.info(f"  📅 Возраст: {real_age:.1f} дней (источник: {age_source})")
     logger.info(f"  🆔 CoinGecko ID: {coin_id}")
 
     # Проверяем/создаем таблицу
@@ -611,12 +696,13 @@ def get_db_stats():
 async def main():
     """Основная функция обновления"""
     print("=" * 60)
-    print("🔄 ОБНОВЛЕНИЕ OHLC ДАННЫХ (БЕЗ ДАТ В ИМЕНАХ ТАБЛИЦ)")
+    print("🔄 ОБНОВЛЕНИЕ OHLC ДАННЫХ (v2 - по реальному возрасту)")
     print(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"API URL: {OHLC_ENDPOINT}")
     print(f"Период данных: {DAYS_TO_FETCH} дней")
     print(f"Макс. одновременных запросов: {MAX_CONCURRENT_REQUESTS}")
     print(f"Задержка между запросами: {REQUEST_DELAY} сек")
+    print("📌 Используется дата первой OHLC записи для определения возраста!")
     print("=" * 60)
 
     # Получаем и показываем статистику
@@ -636,7 +722,6 @@ async def main():
         return
 
     print(f"\n🔄 Начинаем обновление {len(coins)} монет...")
-    print("📌 Таблицы будут создаваться БЕЗ ДАТ в именах!")
 
     # Создаем сессию
     timeout = aiohttp.ClientTimeout(total=60, connect=15)
@@ -683,7 +768,6 @@ async def main():
             print(f"  Сетевые ошибки: {error_counter['network']}")
 
     print("\n✅ Обновление завершено")
-    print("📌 Все таблицы созданы БЕЗ ДАТ в именах!")
     print("=" * 60)
 
 
