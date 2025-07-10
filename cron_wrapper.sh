@@ -26,13 +26,6 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Функция для записи в отдельный лог-файл
-log_to_file() {
-    local logfile="$LOG_DIR/$1_$(date +%Y%m%d).log"
-    shift
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$logfile"
-}
-
 # Проверка Docker
 if ! docker ps >/dev/null 2>&1; then
     log "ERROR: Docker is not running or accessible"
@@ -49,88 +42,64 @@ fi
 # Выполнение команды переданной как аргумент
 case "$1" in
     "parser")
-        log_to_file "parser" "Starting parser.py"
-        /usr/bin/python3 parser.py 2>&1 | tee -a "$LOG_DIR/parser_$(date +%Y%m%d).log"
-        PARSER_EXIT_CODE=${PIPESTATUS[0]}
+        log "Starting parser.py"
+        /usr/bin/python3 parser.py
+        PARSER_EXIT_CODE=$?
 
         if [ $PARSER_EXIT_CODE -eq 0 ]; then
-            log_to_file "parser" "parser.py completed successfully"
+            log "parser.py completed successfully"
 
             # Автоматический запуск parser_coingecko_social.py
-            log_to_file "coingecko" "Starting parser_coingecko_social.py after parser.py"
+            log "Starting parser_coingecko_social.py"
             sleep 5  # Небольшая пауза
-            /usr/bin/python3 parser_coingecko_social.py 2>&1 | tee -a "$LOG_DIR/coingecko_$(date +%Y%m%d).log"
-            COINGECKO_EXIT_CODE=${PIPESTATUS[0]}
+            /usr/bin/python3 parser_coingecko_social.py
+            COINGECKO_EXIT_CODE=$?
 
             if [ $COINGECKO_EXIT_CODE -eq 0 ]; then
-                log_to_file "coingecko" "parser_coingecko_social.py completed successfully"
+                log "parser_coingecko_social.py completed successfully"
             else
-                log_to_file "coingecko" "ERROR: parser_coingecko_social.py failed with exit code $COINGECKO_EXIT_CODE"
+                log "ERROR: parser_coingecko_social.py failed with exit code $COINGECKO_EXIT_CODE"
                 exit $COINGECKO_EXIT_CODE
             fi
         else
-            log_to_file "parser" "ERROR: parser.py failed with exit code $PARSER_EXIT_CODE"
+            log "ERROR: parser.py failed with exit code $PARSER_EXIT_CODE"
             exit $PARSER_EXIT_CODE
         fi
         ;;
 
     "parser_id")
-        log_to_file "parser_id" "Starting parser_id.py"
-        /usr/bin/python3 parser_id.py 2>&1 | tee -a "$LOG_DIR/parser_id_$(date +%Y%m%d).log"
+        log "Starting parser_id.py"
+        /usr/bin/python3 parser_id.py
         ;;
 
     "updater")
-        log_to_file "updater" "Starting updater.py"
-        /usr/bin/python3 updater.py 2>&1 | tee -a "$LOG_DIR/updater_$(date +%Y%m%d).log"
+        log "Starting updater.py"
+        /usr/bin/python3 updater.py
         ;;
 
     "social-only")
-        # Запуск только парсера социальных ссылок
-        log_to_file "coingecko" "Starting parser_coingecko_social.py (standalone)"
-        shift  # Удаляем первый аргумент (команду)
-        /usr/bin/python3 parser_coingecko_social.py "$@" 2>&1 | tee -a "$LOG_DIR/coingecko_$(date +%Y%m%d).log"
-        ;;
-
-    "fresh_updater")
-        log_to_file "fresh_updater" "Starting fresh_updater.py"
-        /usr/bin/python3 fresh_updater.py 2>&1 | tee -a "$LOG_DIR/fresh_updater_$(date +%Y%m%d).log"
-        ;;
-
-    "cleanup_ohlc")
-        log_to_file "cleanup" "Starting cleanup_ohlc.py"
+        log "Starting parser_coingecko_social.py (standalone)"
         shift  # Удаляем первый аргумент
-        /usr/bin/python3 cleanup_ohlc.py "$@" 2>&1 | tee -a "$LOG_DIR/cleanup_$(date +%Y%m%d).log"
-        ;;
-
-    "daily_report")
-        log_to_file "daily_report" "Starting daily_report.py"
-        /usr/bin/python3 daily_report.py 2>&1 | tee -a "$LOG_DIR/daily_report_$(date +%Y%m%d).log"
+        /usr/bin/python3 parser_coingecko_social.py "$@"
         ;;
 
     "full")
-        log_to_file "full" "Starting full update (run.sh)"
-        ./run.sh 2>&1 | tee -a "$LOG_DIR/full_$(date +%Y%m%d).log"
+        log "Starting full update (run.sh)"
+        ./run.sh
         ;;
 
     "backup")
         log "Starting database backup"
         BACKUP_FILE="$BACKUP_DIR/crypto_db_$(date +%Y%m%d_%H%M%S).sql.gz"
         docker exec crypto_db pg_dump -U crypto_user crypto_db | gzip > "$BACKUP_FILE"
-        if [ $? -eq 0 ]; then
-            log "Backup saved to: $BACKUP_FILE"
-            # Удаление старых бэкапов (старше 7 дней)
-            find "$BACKUP_DIR" -name "*.sql.gz" -mtime +7 -delete
-        else
-            log "ERROR: Backup failed"
-            exit 1
-        fi
+        log "Backup saved to: $BACKUP_FILE"
+        # Удаление старых бэкапов (старше 7 дней)
+        find "$BACKUP_DIR" -name "*.sql.gz" -mtime +7 -delete
         ;;
 
     "stats")
         log "Getting database statistics"
         docker exec crypto_db psql -U crypto_user -d crypto_db -t -c "
-            SELECT '===== Database Statistics ====='
-            UNION ALL
             SELECT 'Timestamp: ' || NOW()::timestamp(0)
             UNION ALL
             SELECT 'Database size: ' || pg_size_pretty(pg_database_size('crypto_db'))
@@ -150,66 +119,25 @@ case "$1" in
             SELECT 'New today: ' || COUNT(*) FROM cryptocurrencies WHERE DATE(first_seen_at) = CURRENT_DATE;"
         ;;
 
-    "health_check")
-        # Проверка здоровья системы
-        log "Performing health check"
-
-        # Проверка Docker контейнера
-        if docker ps | grep -q crypto_db; then
-            echo "✅ Database container: Running"
-        else
-            echo "❌ Database container: Not running"
-            exit 1
-        fi
-
-        # Проверка подключения к БД
-        if docker exec crypto_db psql -U crypto_user -d crypto_db -c "SELECT 1;" > /dev/null 2>&1; then
-            echo "✅ Database connection: OK"
-        else
-            echo "❌ Database connection: Failed"
-            exit 1
-        fi
-
-        # Проверка места на диске
-        DISK_USAGE=$(df -h "$PROJECT_DIR" | awk 'NR==2 {print $5}' | sed 's/%//')
-        if [ "$DISK_USAGE" -lt 90 ]; then
-            echo "✅ Disk usage: ${DISK_USAGE}%"
-        else
-            echo "⚠️  Disk usage: ${DISK_USAGE}% (High)"
-        fi
-        ;;
-
-    "cleanup-logs")
-        # Удаление старых логов
-        log "Cleaning up old logs"
-        find "$LOG_DIR" -name "*.log" -mtime +30 -delete
-        log "Old logs removed"
-        ;;
-
     *)
         log "ERROR: Unknown command: $1"
-        echo "Usage: $0 {parser|parser_id|updater|social-only|fresh_updater|cleanup_ohlc|daily_report|full|backup|stats|health_check|cleanup-logs}"
+        echo "Usage: $0 {parser|parser_id|updater|social-only|full|backup|stats}"
         echo ""
         echo "Commands:"
-        echo "  parser           - Run parser.py and then parser_coingecko_social.py"
-        echo "  parser_id        - Run parser_id.py to get CoinGecko IDs"
-        echo "  updater          - Run updater.py for OHLC data"
-        echo "  social-only [args] - Run only parser_coingecko_social.py"
-        echo "  fresh_updater    - Update recently added coins"
-        echo "  cleanup_ohlc [args] - Clean up old OHLC tables"
-        echo "  daily_report     - Generate daily report"
-        echo "  full             - Run full update (run.sh)"
-        echo "  backup           - Create database backup"
-        echo "  stats            - Show database statistics"
-        echo "  health_check     - Check system health"
-        echo "  cleanup-logs     - Remove logs older than 30 days"
+        echo "  parser       - Run parser.py and then parser_coingecko_social.py"
+        echo "  parser_id    - Run parser_id.py to get CoinGecko IDs"
+        echo "  updater      - Run updater.py for OHLC data"
+        echo "  social-only  - Run only parser_coingecko_social.py"
+        echo "  full         - Run full update (run.sh)"
+        echo "  backup       - Create database backup"
+        echo "  stats        - Show database statistics"
         exit 1
         ;;
 esac
 
-# Финальная проверка на ошибки
+# Проверка на ошибки
 if [ $? -eq 0 ]; then
     log "Task completed successfully"
 else
-    log "ERROR: Task failed"
+    log "ERROR: Task failed with exit code $?"
 fi
