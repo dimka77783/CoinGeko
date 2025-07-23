@@ -34,7 +34,38 @@ CREATE TABLE IF NOT EXISTS cryptocurrencies (
     UNIQUE(symbol)
 );
 
--- Индексы
+-- Новая таблица для upcoming ICO проектов
+CREATE TABLE IF NOT EXISTS cryptorank_upcoming (
+    id SERIAL PRIMARY KEY,
+    row_index INTEGER,
+
+    -- Информация о проекте
+    project_name VARCHAR(255) NOT NULL,
+    project_symbol VARCHAR(100),
+    project_url VARCHAR(500) NOT NULL UNIQUE,
+
+    -- Данные проекта
+    project_type VARCHAR(100),  -- IDO, ICO, Private и т.д.
+    initial_cap VARCHAR(100),   -- начальная капитализация
+    ido_raise VARCHAR(100),     -- сумма IDO
+    launch_date DATE,           -- дата запуска в формате YYYY-MM-DD
+    launch_date_original VARCHAR(50), -- оригинальная дата как была спаршена
+    moni_score VARCHAR(50),     -- рейтинг Moni
+
+    -- Массивы для будущих данных
+    investors JSONB DEFAULT '[]'::jsonb,   -- список инвесторов
+    launchpad JSONB DEFAULT '[]'::jsonb,   -- список launchpad платформ
+
+    -- Метаданные
+    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+
+    -- Индексы
+    CONSTRAINT unique_project_url UNIQUE(project_url)
+);
+
+-- Индексы для основной таблицы
 CREATE INDEX IF NOT EXISTS idx_crypto_symbol ON cryptocurrencies(symbol);
 CREATE INDEX IF NOT EXISTS idx_crypto_added_date ON cryptocurrencies(added_date);
 CREATE INDEX IF NOT EXISTS idx_crypto_gecko_id ON cryptocurrencies(coin_gecko_id);
@@ -43,6 +74,14 @@ CREATE INDEX IF NOT EXISTS idx_crypto_chain ON cryptocurrencies(chain);
 CREATE INDEX IF NOT EXISTS idx_crypto_telegram_table ON cryptocurrencies(telegram_table_name);
 CREATE INDEX IF NOT EXISTS idx_crypto_market_cap ON cryptocurrencies(market_cap);
 CREATE INDEX IF NOT EXISTS idx_crypto_social_updated ON cryptocurrencies(social_links_updated);
+
+-- Индексы для таблицы upcoming проектов
+CREATE INDEX IF NOT EXISTS idx_upcoming_symbol ON cryptorank_upcoming(project_symbol);
+CREATE INDEX IF NOT EXISTS idx_upcoming_type ON cryptorank_upcoming(project_type);
+CREATE INDEX IF NOT EXISTS idx_upcoming_launch_date ON cryptorank_upcoming(launch_date);
+CREATE INDEX IF NOT EXISTS idx_upcoming_parsed_at ON cryptorank_upcoming(parsed_at);
+CREATE INDEX IF NOT EXISTS idx_upcoming_active ON cryptorank_upcoming(is_active);
+CREATE INDEX IF NOT EXISTS idx_upcoming_moni_score ON cryptorank_upcoming(moni_score);
 
 -- Функция для обновления last_updated_at
 CREATE OR REPLACE FUNCTION update_last_updated_at()
@@ -53,42 +92,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Триггер обновления времени
+-- Функция для обновления updated_at в upcoming таблице
+CREATE OR REPLACE FUNCTION update_upcoming_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Триггер обновления времени для основной таблицы
 DROP TRIGGER IF EXISTS update_crypto_last_updated ON cryptocurrencies;
 CREATE TRIGGER update_crypto_last_updated
     BEFORE UPDATE ON cryptocurrencies
     FOR EACH ROW
     EXECUTE FUNCTION update_last_updated_at();
 
--- Шаблон таблицы для Telegram сообщений (создается динамически для каждой монеты)
--- Пример: telegram_raco, telegram_btc, и т.д.
-/*
-CREATE TABLE IF NOT EXISTS telegram_SYMBOL (
-    id SERIAL PRIMARY KEY,
-    crypto_id INTEGER REFERENCES cryptocurrencies(id),
-    message_id VARCHAR(100),
-    message_text TEXT,
-    message_date TIMESTAMP,
-    views INTEGER DEFAULT 0,
-    has_media BOOLEAN DEFAULT FALSE,
-    has_photo BOOLEAN DEFAULT FALSE,
-    has_video BOOLEAN DEFAULT FALSE,
-    links TEXT[],
-    message_url VARCHAR(500),
-    channel_name VARCHAR(255),
-    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    -- Анализ сообщений
-    sentiment VARCHAR(20),  -- positive, negative, neutral
-    mentions_price BOOLEAN DEFAULT FALSE,
-    mentions_buy BOOLEAN DEFAULT FALSE,
-    mentions_sell BOOLEAN DEFAULT FALSE,
-    extracted_price NUMERIC,
-    extracted_percentage NUMERIC,
-
-    UNIQUE(message_id, channel_name)
-);
-*/
+-- Триггер обновления времени для upcoming таблицы
+DROP TRIGGER IF EXISTS update_upcoming_updated ON cryptorank_upcoming;
+CREATE TRIGGER update_upcoming_updated
+    BEFORE UPDATE ON cryptorank_upcoming
+    FOR EACH ROW
+    EXECUTE FUNCTION update_upcoming_updated_at();
 
 -- Представление для удобного просмотра с Telegram и социальными данными
 CREATE OR REPLACE VIEW crypto_stats AS
@@ -127,6 +152,53 @@ SELECT
     END as telegram_table_exists
 FROM cryptocurrencies c
 ORDER BY c.first_seen_at DESC;
+
+-- Представление для upcoming проектов
+CREATE OR REPLACE VIEW upcoming_projects_stats AS
+SELECT
+    project_name,
+    project_symbol,
+    project_type,
+    initial_cap,
+    ido_raise,
+    launch_date,
+    launch_date_original,
+    moni_score,
+    parsed_at,
+    updated_at,
+    CASE
+        WHEN launch_date IS NOT NULL THEN
+            EXTRACT(EPOCH FROM (launch_date::timestamp - CURRENT_TIMESTAMP))/86400
+        ELSE NULL
+    END as days_until_launch,
+    CASE
+        WHEN launch_date < CURRENT_DATE THEN 'Прошедший'
+        WHEN launch_date = CURRENT_DATE THEN 'Сегодня'
+        WHEN launch_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'На этой неделе'
+        WHEN launch_date <= CURRENT_DATE + INTERVAL '30 days' THEN 'В этом месяце'
+        ELSE 'Будущий'
+    END as launch_status
+FROM cryptorank_upcoming
+WHERE is_active = TRUE
+ORDER BY launch_date ASC NULLS LAST;
+
+-- Представление для активных upcoming проектов с близкими датами
+CREATE OR REPLACE VIEW upcoming_soon AS
+SELECT
+    project_name,
+    project_symbol,
+    project_type,
+    initial_cap,
+    ido_raise,
+    launch_date,
+    moni_score,
+    EXTRACT(EPOCH FROM (launch_date::timestamp - CURRENT_TIMESTAMP))/86400 as days_until_launch
+FROM cryptorank_upcoming
+WHERE is_active = TRUE
+  AND launch_date IS NOT NULL
+  AND launch_date >= CURRENT_DATE
+  AND launch_date <= CURRENT_DATE + INTERVAL '30 days'
+ORDER BY launch_date ASC;
 
 -- Представление для социальных ссылок
 CREATE OR REPLACE VIEW crypto_social_links AS
@@ -312,6 +384,30 @@ BEGIN
     ', table_name, p_limit);
 
     RETURN QUERY EXECUTE query;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Функция для получения статистики upcoming проектов
+CREATE OR REPLACE FUNCTION get_upcoming_stats()
+RETURNS TABLE(
+    total_projects BIGINT,
+    active_projects BIGINT,
+    this_week BIGINT,
+    this_month BIGINT,
+    with_initial_cap BIGINT,
+    avg_moni_score NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        COUNT(*) as total_projects,
+        COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_projects,
+        COUNT(CASE WHEN launch_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN 1 END) as this_week,
+        COUNT(CASE WHEN launch_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN 1 END) as this_month,
+        COUNT(CASE WHEN initial_cap IS NOT NULL AND initial_cap != '' THEN 1 END) as with_initial_cap,
+        ROUND(AVG(CASE WHEN moni_score ~ '^[0-9]+$' THEN moni_score::NUMERIC ELSE NULL END), 2) as avg_moni_score
+    FROM cryptorank_upcoming
+    WHERE is_active = TRUE;
 END;
 $$ LANGUAGE plpgsql;
 

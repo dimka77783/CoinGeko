@@ -77,6 +77,11 @@ case "$1" in
         /usr/bin/python3 updater.py
         ;;
 
+    "upcoming")
+        log "Starting cryptoranc_upcoin_table.py (upcoming ICO parser)"
+        /usr/bin/python3 cryptoranc_upcoin_table.py
+        ;;
+
     "social-only")
         log "Starting parser_coingecko_social.py (standalone)"
         shift  # Удаляем первый аргумент
@@ -116,21 +121,46 @@ case "$1" in
             UNION ALL
             SELECT 'Social links updated today: ' || COUNT(*) FROM cryptocurrencies WHERE DATE(social_links_updated) = CURRENT_DATE
             UNION ALL
-            SELECT 'New today: ' || COUNT(*) FROM cryptocurrencies WHERE DATE(first_seen_at) = CURRENT_DATE;"
+            SELECT 'New today: ' || COUNT(*) FROM cryptocurrencies WHERE DATE(first_seen_at) = CURRENT_DATE
+            UNION ALL
+            SELECT '--- UPCOMING PROJECTS ---'
+            UNION ALL
+            SELECT 'Total upcoming: ' || total_projects FROM get_upcoming_stats()
+            UNION ALL
+            SELECT 'Active upcoming: ' || active_projects FROM get_upcoming_stats()
+            UNION ALL
+            SELECT 'This week: ' || this_week FROM get_upcoming_stats()
+            UNION ALL
+            SELECT 'This month: ' || this_month FROM get_upcoming_stats();"
+        ;;
+
+    "upcoming-stats")
+        log "Getting upcoming projects statistics"
+        docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+        SELECT 'UPCOMING PROJECTS STATISTICS' as info;
+        SELECT * FROM get_upcoming_stats();
+        SELECT 'PROJECTS THIS WEEK:' as info;
+        SELECT project_name, project_symbol, project_type, launch_date, days_until_launch
+        FROM upcoming_soon
+        WHERE days_until_launch <= 7
+        ORDER BY launch_date;
+        "
         ;;
 
     *)
         log "ERROR: Unknown command: $1"
-        echo "Usage: $0 {parser|parser_id|updater|social-only|full|backup|stats}"
+        echo "Usage: $0 {parser|parser_id|updater|upcoming|social-only|full|backup|stats|upcoming-stats}"
         echo ""
         echo "Commands:"
-        echo "  parser       - Run parser.py and then parser_coingecko_social.py"
-        echo "  parser_id    - Run parser_id.py to get CoinGecko IDs"
-        echo "  updater      - Run updater.py for OHLC data"
-        echo "  social-only  - Run only parser_coingecko_social.py"
-        echo "  full         - Run full update (run.sh)"
-        echo "  backup       - Create database backup"
-        echo "  stats        - Show database statistics"
+        echo "  parser          - Run parser.py and then parser_coingecko_social.py"
+        echo "  parser_id       - Run parser_id.py to get CoinGecko IDs"
+        echo "  updater         - Run updater.py for OHLC data"
+        echo "  upcoming        - Run cryptoranc_upcoin_table.py for upcoming ICO projects"
+        echo "  social-only     - Run only parser_coingecko_social.py"
+        echo "  full            - Run full update (run.sh)"
+        echo "  backup          - Create database backup"
+        echo "  stats           - Show database statistics (including upcoming)"
+        echo "  upcoming-stats  - Show detailed upcoming projects statistics"
         exit 1
         ;;
 esac
