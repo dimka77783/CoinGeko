@@ -71,13 +71,16 @@ def get_projects_from_db(limit=10):
         return []
 
 
-def find_platforms_on_project_page(driver, project, max_retries=3):
-    """Находим платформы на странице конкретного проекта с повторными попытками"""
+def find_platforms_on_project_page(driver, project):
+    """Находим платформы на странице конкретного проекта с бесконечными попытками"""
     platforms_found = []
+    attempt = 0
+    max_wait_time = 300  # Максимальная задержка 5 минут
 
-    for attempt in range(max_retries):
+    while True:
+        attempt += 1
         try:
-            print(f"\n🔍 Сканирование: {project['name']} ({project['symbol']}) - попытка {attempt + 1}/{max_retries}")
+            print(f"\n🔍 Сканирование: {project['name']} ({project['symbol']}) - попытка {attempt}")
             print(f"🌐 URL: {project['url']}")
 
             # Заходим на страницу проекта с увеличенным таймаутом
@@ -159,29 +162,36 @@ def find_platforms_on_project_page(driver, project, max_retries=3):
 
             # Если успешно получили данные, выходим из цикла
             print(f"   ✅ Успешно обработан проект {project['name']}")
-            break
+            return platforms_found
 
         except Exception as e:
-            print(f"   ❌ Ошибка попытки {attempt + 1}: {e}")
+            print(f"   ❌ Ошибка попытки {attempt}: {e}")
 
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5  # Увеличиваем время ожидания: 5, 10, 15 секунд
-                print(f"   ⏳ Ожидание {wait_time} секунд перед повторной попыткой...")
-                time.sleep(wait_time)
+            # Вычисляем время ожидания (экспоненциальный рост с максимумом)
+            wait_time = min(attempt * 10, max_wait_time)  # 10, 20, 30, ..., до 300 секунд
+            print(f"   ⏳ Ожидание {wait_time} секунд перед попыткой {attempt + 1}...")
+            time.sleep(wait_time)
 
-                # Перезапускаем браузер при серьезных ошибках
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                    print(f"   🔄 Перезапуск браузера из-за проблем с соединением...")
+            # Перезапускаем браузер при серьезных ошибках
+            if any(keyword in str(e).lower() for keyword in ['timeout', 'connection', 'refused', 'reset']):
+                print(f"   🔄 Перезапуск браузера из-за проблем с соединением...")
+                try:
+                    driver.quit()
+                    time.sleep(5)
+                    driver = setup_driver()
+                except Exception as restart_error:
+                    print(f"   ⚠️ Ошибка перезапуска браузера: {restart_error}")
+                    time.sleep(10)  # Дополнительная пауза при проблемах с браузером
                     try:
-                        driver.quit()
-                        time.sleep(3)
                         driver = setup_driver()
                     except:
-                        pass
-            else:
-                print(f"   💥 Все попытки исчерпаны для проекта {project['name']}")
+                        print(f"   💥 Не удалось перезапустить браузер, пауза 30 секунд...")
+                        time.sleep(30)
+                        driver = setup_driver()
 
-    return platforms_found
+            # Логируем прогресс каждые 10 попыток
+            if attempt % 10 == 0:
+                print(f"   📊 Попытка {attempt}: продолжаем попытки с задержкой {wait_time}с")
 
 
 def remove_duplicates(platforms):
@@ -401,8 +411,7 @@ def analyze_platforms(platforms):
     for project_name, project_platforms in by_projects.items():
         print(f"\n   🎯 {project_name}:")
         for platform in project_platforms:
-            status = "✅" if platform['position_status'] == 'above' else "🚫" if platform[
-                                                                                   'position_status'] == 'below' else "❓"
+            status = "✅" if platform['position_status'] == 'above' else "🚫" if platform['position_status'] == 'below' else "❓"
             print(f"      {status} {platform['platform_name']}")
 
     return unique_platforms
@@ -423,15 +432,15 @@ def main():
             print("❌ Проекты в БД не найдены")
             return
 
-        # Сканируем каждый проект с повторными попытками
+        # Сканируем каждый проект с бесконечными попытками
         for i, project in enumerate(projects, 1):
             print(f"\n🚀 Проект {i}/{len(projects)}:")
 
-            platforms = find_platforms_on_project_page(driver, project, max_retries=3)
+            platforms = find_platforms_on_project_page(driver, project)
             all_platforms.extend(platforms)
 
             # Пауза между запросами для предотвращения блокировки
-            time.sleep(2)
+            time.sleep(3)
 
         # Анализируем результаты (возвращает уникальные платформы)
         unique_platforms = analyze_platforms(all_platforms)

@@ -128,6 +128,26 @@ class CryptoRankUpcomingParser:
 
         return text
 
+    def merge_arrays(self, existing_array, new_array):
+        """
+        Умное объединение массивов investors/launchpad
+        Если новый массив пустой - оставляем существующий
+        Если есть новые данные - объединяем без дублей
+        """
+        if not new_array:  # Если новый массив пустой
+            return existing_array if existing_array else []
+
+        if not existing_array:  # Если существующий массив пустой
+            return new_array
+
+        # Объединяем массивы без дублей
+        combined = list(existing_array)
+        for item in new_array:
+            if item not in combined:
+                combined.append(item)
+
+        return combined
+
     def parse_table(self):
         """Парсинг таблицы"""
         driver = self.setup_driver(headless=True)
@@ -336,7 +356,7 @@ class CryptoRankUpcomingParser:
 
                 # Проверяем существование по URL
                 cursor.execute("""
-                    SELECT id, updated_at FROM cryptorank_upcoming 
+                    SELECT id, updated_at, investors, launchpad FROM cryptorank_upcoming 
                     WHERE project_url = %s
                 """, (url,))
 
@@ -345,6 +365,15 @@ class CryptoRankUpcomingParser:
                 if existing:
                     # Обновляем существующую запись
                     existing_id = existing[0]
+                    existing_investors = existing[2] if existing[2] else []
+                    existing_launchpad = existing[3] if existing[3] else []
+
+                    # Умно объединяем массивы
+                    new_investors = project.get('investors', [])
+                    new_launchpad = project.get('launchpad', [])
+
+                    merged_investors = self.merge_arrays(existing_investors, new_investors)
+                    merged_launchpad = self.merge_arrays(existing_launchpad, new_launchpad)
 
                     cursor.execute("""
                         UPDATE cryptorank_upcoming SET
@@ -370,14 +399,24 @@ class CryptoRankUpcomingParser:
                         launch_date,
                         launch_date_original,
                         project.get('moni_score'),
-                        json.dumps(project.get('investors', [])),
-                        json.dumps(project.get('launchpad', [])),
+                        json.dumps(merged_investors),
+                        json.dumps(merged_launchpad),
                         project.get('row_index'),
                         existing_id
                     ))
 
                     updated_count += 1
-                    print(f"  🔄 Обновлен: {project_info.get('name')} ({project_info.get('symbol')})")
+
+                    # Показываем что изменилось
+                    investors_changed = len(merged_investors) > len(existing_investors)
+                    launchpad_changed = len(merged_launchpad) > len(existing_launchpad)
+                    change_info = ""
+                    if investors_changed:
+                        change_info += f" [+{len(merged_investors) - len(existing_investors)} investors]"
+                    if launchpad_changed:
+                        change_info += f" [+{len(merged_launchpad) - len(existing_launchpad)} launchpad]"
+
+                    print(f"  🔄 Обновлен: {project_info.get('name')} ({project_info.get('symbol')}){change_info}")
 
                 else:
                     # Вставляем новую запись
