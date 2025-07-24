@@ -71,107 +71,262 @@ def get_projects_from_db(limit=10):
         return []
 
 
-def find_platforms_on_project_page(driver, project):
-    """Находим платформы на странице конкретного проекта"""
+def find_platforms_on_project_page(driver, project, max_retries=3):
+    """Находим платформы на странице конкретного проекта с повторными попытками"""
     platforms_found = []
 
-    try:
-        print(f"\n🔍 Сканирование: {project['name']} ({project['symbol']})")
-        print(f"🌐 URL: {project['url']}")
+    for attempt in range(max_retries):
+        try:
+            print(f"\n🔍 Сканирование: {project['name']} ({project['symbol']}) - попытка {attempt + 1}/{max_retries}")
+            print(f"🌐 URL: {project['url']}")
 
-        # Заходим на страницу проекта
-        driver.get(project['url'])
-        time.sleep(3)
+            # Заходим на страницу проекта с увеличенным таймаутом
+            driver.set_page_load_timeout(60)  # 60 секунд на загрузку страницы
+            driver.get(project['url'])
+            time.sleep(5)
 
-        # Прокручиваем страницу для загрузки всех элементов
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(1)
+            # Прокручиваем страницу для загрузки всех элементов
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
 
-        # ============ ПОИСК "TRENDING TOKEN SALES" ============
-        trending_elements = driver.find_elements(By.XPATH,
-                                                 "//*[contains(text(), 'Trending Token Sales') and not(self::script) and not(ancestor::script)]")
+            # ============ ПОИСК "TRENDING TOKEN SALES" ============
+            trending_elements = driver.find_elements(By.XPATH,
+                                                     "//*[contains(text(), 'Trending Token Sales') and not(self::script) and not(ancestor::script)]")
 
-        visible_trending_elements = []
-        for element in trending_elements:
-            try:
-                if element.is_displayed() and element.size['width'] > 0 and element.size['height'] > 0:
-                    visible_trending_elements.append(element)
-            except:
-                continue
+            visible_trending_elements = []
+            for element in trending_elements:
+                try:
+                    if element.is_displayed() and element.size['width'] > 0 and element.size['height'] > 0:
+                        visible_trending_elements.append(element)
+                except:
+                    continue
 
-        trending_y_position = None
-        if visible_trending_elements:
-            positions = [elem.location['y'] for elem in visible_trending_elements if elem.location['y'] > 100]
-            if positions:
-                trending_y_position = max(positions)
-                print(f"   🎯 'Trending Token Sales' найден на Y={trending_y_position}")
+            trending_y_position = None
+            if visible_trending_elements:
+                positions = [elem.location['y'] for elem in visible_trending_elements if elem.location['y'] > 100]
+                if positions:
+                    trending_y_position = max(positions)
+                    print(f"   🎯 'Trending Token Sales' найден на Y={trending_y_position}")
 
-        # ============ ПОИСК FUNDRAISING ССЫЛОК ============
-        fundraising_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/fundraising-platforms/')]")
-        print(f"   💰 Найдено fundraising ссылок: {len(fundraising_links)}")
+            # ============ ПОИСК FUNDRAISING ССЫЛОК ============
+            fundraising_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/fundraising-platforms/')]")
+            print(f"   💰 Найдено fundraising ссылок: {len(fundraising_links)}")
 
-        for link in fundraising_links:
-            try:
-                position = link.location
-                text = link.text.strip()
-                href = link.get_attribute('href')
-                title = link.get_attribute('title') or ''
+            for link in fundraising_links:
+                try:
+                    position = link.location
+                    text = link.text.strip()
+                    href = link.get_attribute('href')
+                    title = link.get_attribute('title') or ''
 
-                # Извлекаем название платформы из URL
-                platform_name = ""
-                if '/fundraising-platforms/' in href:
-                    platform_name = href.split('/fundraising-platforms/')[-1]
-                    platform_name = platform_name.replace('-', ' ').title()
+                    # Извлекаем название платформы из URL
+                    platform_name = ""
+                    if '/fundraising-platforms/' in href:
+                        platform_name = href.split('/fundraising-platforms/')[-1]
+                        platform_name = platform_name.replace('-', ' ').title()
 
-                # Определяем позицию относительно Trending Token Sales
-                position_status = "unknown"
-                if trending_y_position:
-                    if position['y'] < trending_y_position:
-                        position_status = "above"
-                    else:
-                        position_status = "below"
+                    # Определяем позицию относительно Trending Token Sales
+                    position_status = "unknown"
+                    if trending_y_position:
+                        if position['y'] < trending_y_position:
+                            position_status = "above"
+                        else:
+                            position_status = "below"
 
-                platform_info = {
-                    'project_id': project['id'],
-                    'project_name': project['name'],
-                    'project_url': project['url'],
-                    'platform_name': platform_name,
-                    'platform_text': text,
-                    'platform_title': title,
-                    'platform_href': href,
-                    'position_x': position['x'],
-                    'position_y': position['y'],
-                    'position_status': position_status,
-                    'trending_position': trending_y_position
-                }
+                    platform_info = {
+                        'project_id': project['id'],
+                        'project_name': project['name'],
+                        'project_url': project['url'],
+                        'platform_name': platform_name,
+                        'platform_text': text,
+                        'platform_title': title,
+                        'platform_href': href,
+                        'position_x': position['x'],
+                        'position_y': position['y'],
+                        'position_status': position_status,
+                        'trending_position': trending_y_position
+                    }
 
-                platforms_found.append(platform_info)
+                    platforms_found.append(platform_info)
 
-                status_emoji = "✅" if position_status == "above" else "🚫" if position_status == "below" else "❓"
-                print(f"      {status_emoji} {platform_name} | {text} | Y={position['y']}")
+                    status_emoji = "✅" if position_status == "above" else "🚫" if position_status == "below" else "❓"
+                    print(f"      {status_emoji} {platform_name} | {text} | Y={position['y']}")
 
-            except Exception as e:
-                print(f"      ❌ Ошибка обработки ссылки: {e}")
+                except Exception as e:
+                    print(f"      ❌ Ошибка обработки ссылки: {e}")
 
-    except Exception as e:
-        print(f"   ❌ Ошибка сканирования проекта {project['name']}: {e}")
+            # Если успешно получили данные, выходим из цикла
+            print(f"   ✅ Успешно обработан проект {project['name']}")
+            break
+
+        except Exception as e:
+            print(f"   ❌ Ошибка попытки {attempt + 1}: {e}")
+
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5  # Увеличиваем время ожидания: 5, 10, 15 секунд
+                print(f"   ⏳ Ожидание {wait_time} секунд перед повторной попыткой...")
+                time.sleep(wait_time)
+
+                # Перезапускаем браузер при серьезных ошибках
+                if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    print(f"   🔄 Перезапуск браузера из-за проблем с соединением...")
+                    try:
+                        driver.quit()
+                        time.sleep(3)
+                        driver = setup_driver()
+                    except:
+                        pass
+            else:
+                print(f"   💥 Все попытки исчерпаны для проекта {project['name']}")
 
     return platforms_found
+
+
+def remove_duplicates(platforms):
+    """Удаляем дубликаты платформ"""
+    print(f"\n🔧 УДАЛЕНИЕ ДУБЛИКАТОВ:")
+    print("-" * 30)
+    print(f"📊 Платформ до удаления дубликатов: {len(platforms)}")
+
+    # Используем set для отслеживания уникальных комбинаций
+    seen = set()
+    unique_platforms = []
+
+    for platform in platforms:
+        # Создаем уникальный ключ на основе проекта и платформы
+        key = (
+            platform['project_id'],
+            platform['platform_name'].lower().strip(),
+            platform['platform_href']
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique_platforms.append(platform)
+
+    duplicates_removed = len(platforms) - len(unique_platforms)
+    print(f"🗑️ Удалено дубликатов: {duplicates_removed}")
+    print(f"✅ Уникальных платформ: {len(unique_platforms)}")
+
+    return unique_platforms
+
+
+def update_launchpads_in_db(platforms):
+    """Обновляем поле launchpad в таблице cryptorank_upcoming"""
+    print(f"\n💾 ОБНОВЛЕНИЕ LAUNCHPAD В БД (ТОЛЬКО ВАЛИДНЫЕ ПЛАТФОРМЫ):")
+    print("-" * 60)
+
+    try:
+        connection = psycopg2.connect(**DB_CONFIG)
+        cursor = connection.cursor()
+
+        # Группируем ТОЛЬКО валидные платформы (выше Trending Token Sales) по project_id
+        platforms_by_project = {}
+        for platform in platforms:
+            # Сохраняем только платформы со статусом "above" (✅)
+            if platform['position_status'] != 'above':
+                continue
+
+            project_id = platform['project_id']
+            platform_name = platform['platform_name']
+
+            if project_id not in platforms_by_project:
+                platforms_by_project[project_id] = set()
+
+            if platform_name and platform_name.strip():
+                platforms_by_project[project_id].add(platform_name.strip())
+
+        updated_count = 0
+
+        for project_id, platform_names in platforms_by_project.items():
+            if not platform_names:
+                continue
+
+            # Получаем текущее значение launchpad для проекта
+            cursor.execute("SELECT launchpad FROM cryptorank_upcoming WHERE id = %s", (project_id,))
+            result = cursor.fetchone()
+
+            if result:
+                current_launchpad = result[0]
+
+                # Парсим существующие платформы из JSON
+                existing_platforms = set()
+                if current_launchpad:
+                    try:
+                        if isinstance(current_launchpad, str):
+                            # Если это строка JSON
+                            existing_data = json.loads(current_launchpad)
+                        else:
+                            # Если это уже объект Python
+                            existing_data = current_launchpad
+
+                        if isinstance(existing_data, list):
+                            existing_platforms = set(existing_data)
+                        elif isinstance(existing_data, str):
+                            # Если в JSON лежит строка через запятую
+                            existing_platforms = set(p.strip() for p in existing_data.split(',') if p.strip())
+                    except (json.JSONDecodeError, TypeError):
+                        # Если не JSON, пытаемся парсить как строку
+                        if isinstance(current_launchpad, str):
+                            existing_platforms = set(p.strip() for p in current_launchpad.split(',') if p.strip())
+
+                # Объединяем с новыми ВАЛИДНЫМИ платформами (только уникальные)
+                all_platforms = existing_platforms.union(platform_names)
+
+                # Создаем JSON массив
+                launchpad_json = json.dumps(sorted(list(all_platforms)), ensure_ascii=False)
+
+                # Сравниваем с текущим значением
+                current_platforms_set = existing_platforms
+                new_platforms_set = all_platforms
+
+                # Обновляем только если есть изменения
+                if current_platforms_set != new_platforms_set:
+                    cursor.execute(
+                        "UPDATE cryptorank_upcoming SET launchpad = %s WHERE id = %s",
+                        (launchpad_json, project_id)
+                    )
+                    updated_count += 1
+
+                    # Получаем название проекта для отчета
+                    cursor.execute("SELECT project_name FROM cryptorank_upcoming WHERE id = %s", (project_id,))
+                    project_result = cursor.fetchone()
+                    project_name = project_result[0] if project_result else f"ID_{project_id}"
+
+                    platforms_str = ', '.join(sorted(list(all_platforms)))
+                    print(f"   ✅ {project_name}: {platforms_str}")
+
+        connection.commit()
+        connection.close()
+
+        print(f"\n📊 Обновлено проектов: {updated_count}")
+        print(f"💾 Всего обработано проектов: {len(platforms_by_project)}")
+        print(f"🎯 Сохранены только валидные платформы (выше 'Trending Token Sales')")
+
+    except Exception as e:
+        print(f"❌ Ошибка обновления БД: {e}")
+        import traceback
+        print(traceback.format_exc())
 
 
 def save_platforms_to_json(platforms):
     """Сохраняем найденные платформы в JSON файл"""
     try:
+        # Удаляем дубликаты перед сохранением
+        unique_platforms = remove_duplicates(platforms)
+
         # Подготавливаем данные для JSON
         json_data = {
             "scan_info": {
                 "timestamp": datetime.now().isoformat(),
-                "total_platforms": len(platforms),
-                "total_projects": len(set(p['project_name'] for p in platforms))
+                "total_platforms_found": len(platforms),
+                "unique_platforms": len(unique_platforms),
+                "duplicates_removed": len(platforms) - len(unique_platforms),
+                "total_projects": len(set(p['project_name'] for p in unique_platforms))
             },
-            "platforms": platforms
+            "platforms": unique_platforms
         }
 
         # Сохраняем в JSON файл
@@ -180,7 +335,11 @@ def save_platforms_to_json(platforms):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
 
-        print(f"✅ Сохранено {len(platforms)} платформ в файл: {filename}")
+        print(f"✅ Сохранено {len(unique_platforms)} уникальных платформ в файл: {filename}")
+
+        # Обновляем БД
+        update_launchpads_in_db(unique_platforms)
+
         return filename
 
     except Exception as e:
@@ -197,36 +356,39 @@ def analyze_platforms(platforms):
         print("❌ Платформы не найдены")
         return
 
+    # Удаляем дубликаты для анализа
+    unique_platforms = remove_duplicates(platforms)
+
     # Группируем по проектам
     by_projects = {}
-    for platform in platforms:
+    for platform in unique_platforms:
         project_name = platform['project_name']
         if project_name not in by_projects:
             by_projects[project_name] = []
         by_projects[project_name].append(platform)
 
     print(f"📈 Всего проектов проверено: {len(by_projects)}")
-    print(f"💰 Всего платформ найдено: {len(platforms)}")
+    print(f"💰 Всего уникальных платформ: {len(unique_platforms)}")
 
     # Уникальные платформы
-    unique_platforms = set()
+    unique_platform_names = set()
     above_count = 0
     below_count = 0
 
-    for platform in platforms:
-        unique_platforms.add(platform['platform_name'])
+    for platform in unique_platforms:
+        unique_platform_names.add(platform['platform_name'])
         if platform['position_status'] == 'above':
             above_count += 1
         elif platform['position_status'] == 'below':
             below_count += 1
 
-    print(f"🎯 Уникальных платформ: {len(unique_platforms)}")
+    print(f"🎯 Уникальных названий платформ: {len(unique_platform_names)}")
     print(f"✅ Платформ выше 'Trending Token Sales': {above_count}")
     print(f"🚫 Платформ ниже 'Trending Token Sales': {below_count}")
 
     # Топ платформ
     platform_counts = {}
-    for platform in platforms:
+    for platform in unique_platforms:
         name = platform['platform_name']
         platform_counts[name] = platform_counts.get(name, 0) + 1
 
@@ -241,7 +403,9 @@ def analyze_platforms(platforms):
         for platform in project_platforms:
             status = "✅" if platform['position_status'] == 'above' else "🚫" if platform[
                                                                                    'position_status'] == 'below' else "❓"
-            print(f"      {status} {platform['platform_name']} ({platform['platform_text']})")
+            print(f"      {status} {platform['platform_name']}")
+
+    return unique_platforms
 
 
 def main():
@@ -259,22 +423,22 @@ def main():
             print("❌ Проекты в БД не найдены")
             return
 
-        # Сканируем каждый проект
+        # Сканируем каждый проект с повторными попытками
         for i, project in enumerate(projects, 1):
             print(f"\n🚀 Проект {i}/{len(projects)}:")
 
-            platforms = find_platforms_on_project_page(driver, project)
+            platforms = find_platforms_on_project_page(driver, project, max_retries=3)
             all_platforms.extend(platforms)
 
-            # Небольшая пауза между запросами
-            time.sleep(1)
+            # Пауза между запросами для предотвращения блокировки
+            time.sleep(2)
 
-        # Сохраняем результаты в JSON
+        # Анализируем результаты (возвращает уникальные платформы)
+        unique_platforms = analyze_platforms(all_platforms)
+
+        # Сохраняем результаты в JSON (функция сама удалит дубликаты)
         if all_platforms:
             json_filename = save_platforms_to_json(all_platforms)
-
-        # Анализируем результаты
-        analyze_platforms(all_platforms)
 
     except Exception as e:
         print(f"❌ Критическая ошибка: {e}")
