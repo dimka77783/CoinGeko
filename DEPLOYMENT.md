@@ -26,7 +26,8 @@
 - Docker и Docker Compose
 - PostgreSQL (через Docker)
 - Git
-- aiohttp, psycopg2 (Python библиотеки)
+- Chrome/Chromium для Selenium
+- aiohttp, psycopg2, selenium (Python библиотеки)
 
 ## Подготовка сервера
 
@@ -59,7 +60,28 @@ sudo apt install -y libpq-dev gcc
 python3 --version
 ```
 
-### 2. Установка Docker
+### 2. Установка Chrome для Selenium
+```bash
+# Добавление репозитория Google Chrome
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+
+# Обновление и установка Chrome
+sudo apt update
+sudo apt install -y google-chrome-stable
+
+# Установка ChromeDriver
+CHROME_DRIVER_VERSION=$(curl -sS chromedriver.chromium.org/LATEST_RELEASE)
+wget -O /tmp/chromedriver.zip http://chromedriver.chromium.org/$CHROME_DRIVER_VERSION/chromedriver_linux64.zip
+sudo unzip /tmp/chromedriver.zip chromedriver -d /usr/local/bin/
+sudo chmod +x /usr/local/bin/chromedriver
+
+# Проверка
+google-chrome --version
+chromedriver --version
+```
+
+### 3. Установка Docker
 ```bash
 # Установка Docker
 curl -fsSL https://get.docker.com -o get-docker.sh
@@ -77,7 +99,7 @@ ssh user@your-server-ip
 docker --version
 ```
 
-### 3. Установка Docker Compose
+### 4. Установка Docker Compose
 ```bash
 # Установка Docker Compose
 sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
@@ -87,7 +109,7 @@ sudo chmod +x /usr/local/bin/docker-compose
 docker-compose --version
 ```
 
-### 4. Установка PostgreSQL клиента (опционально)
+### 5. Установка PostgreSQL клиента (опционально)
 ```bash
 sudo apt install -y postgresql-client
 ```
@@ -123,14 +145,29 @@ ls -la
 
 ### 4. Копирование файлов проекта
 Скопируйте следующие файлы в директорию проекта:
-- `docker-compose.yml`
-- `init_db.sql`
+
+**Основные компоненты:**
+- `docker-compose.yml` - конфигурация Docker
+- `init_db.sql` - схема базы данных
+- `clean_db.py` - управление базой данных
+
+**Парсеры:**
 - `parser.py` - основной парсер новых монет
-- `parser_id.py` - получение CoinGecko ID монет
+- `parser_id.py` - получение CoinGecko ID монет  
+- `parser_coingecko_social.py` - парсер социальных ссылок
 - `updater.py` - обновление OHLC данных
+- `cryptoranc_upcoin_table.py` - парсер upcoming ICO проектов
+- `cryptorank_platform.py` - **НОВЫЙ**: парсер платформ для launchpad
+
+**Системные файлы:**
 - `run.sh` - скрипт полного цикла обновления
-- `clean_db.py` - скрипт очистки базы данных
-- `requirements.txt`
+- `cron_wrapper.sh` - **ОБНОВЛЕН**: wrapper для cron с поддержкой новых команд
+- `requirements.txt` - зависимости Python
+
+### 5. Новые файлы в версии 3.0:
+- **`cryptorank_platform.py`** - автоматически находит платформы для ICO проектов
+- **Обновленный `cron_wrapper.sh`** - поддержка команд `upcoming`, `social-only`, `upcoming-stats`
+- **Расширенный `init_db.sql`** - новая таблица `cryptorank_upcoming` с поддержкой JSON полей
 
 ## Настройка базы данных
 
@@ -186,10 +223,14 @@ source venv/bin/activate
 cat > requirements.txt << EOF
 aiohttp==3.9.1
 psycopg2-binary==2.9.9
+selenium==4.15.2
+python-dotenv==1.0.0
 asyncio
 logging
 urllib3>=1.26.0
 certifi
+beautifulsoup4
+lxml
 EOF
 
 # Установка зависимостей
@@ -215,12 +256,16 @@ DB_PASSWORD=crypto_password
 MAX_COINS=30
 PARSER_MODE=safe
 DEBUG=false
+
+# Platform parser settings
+PLATFORM_SCAN_LIMIT=50
+PLATFORM_MAX_RETRIES=3
 ```
 
 ### 4. Настройка прав на выполнение
 ```bash
 # Сделать скрипты исполняемыми
-chmod +x parser.py parser_id.py updater.py run.sh clean_db.py
+chmod +x *.py *.sh
 ```
 
 ## Восстановление базы данных
@@ -251,18 +296,6 @@ python3 clean_db.py
 # Или пункт 5 (ПЕРЕИНИЦИАЛИЗАЦИЯ) для полной очистки + восстановление
 ```
 
-#### 🔧 Способ 3: Пошаговое восстановление
-```bash
-# 1. Проверьте подключение к БД
-docker exec crypto_db pg_isready -U crypto_user
-
-# 2. Восстановите структуру
-docker exec -i crypto_db psql -U crypto_user -d crypto_db < init_db.sql
-
-# 3. Проверьте результат
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "\dt"
-```
-
 #### ✅ Проверка успешного восстановления
 ```bash
 # Проверьте созданные таблицы
@@ -273,35 +306,32 @@ WHERE table_schema = 'public'
 ORDER BY table_name;
 "
 
-# Проверьте структуру основной таблицы
+# Проверьте структуру основных таблиц
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "\d cryptocurrencies"
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "\d cryptorank_upcoming"
 
-# Проверьте функции и триггеры
+# Проверьте функции и представления
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "\df"
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "\dv"
 ```
 
-#### 🎯 Что восстанавливается:
-- **Таблица `cryptocurrencies`** с полной структурой
+#### 🎯 Что восстанавливается в версии 3.0:
+- **Таблица `cryptocurrencies`** с социальными ссылками и Telegram поддержкой
+- **Таблица `cryptorank_upcoming`** для ICO проектов с JSON полями
 - **Индексы** для оптимизации запросов  
 - **Функции**:
-  - `update_last_updated_at()` - обновление времени
-  - `safe_table_name()` - генерация имен OHLC таблиц
-  - `create_ohlc_table()` - создание OHLC таблиц
-- **Триггеры**:
-  - Автоматическое обновление `last_updated_at`
-  - Автоматическое создание OHLC таблиц при добавлении монет
-- **Представление `crypto_stats`** для удобной статистики
-
-#### 🔄 После восстановления
-```bash
-# Активируйте виртуальное окружение
-source venv/bin/activate
-
-# Проверьте работу парсера
-python3 parser.py
-
-# Структура БД готова к работе!
-```
+  - `update_last_updated_at()` - обновление времени для основной таблицы
+  - `update_upcoming_updated_at()` - обновление времени для upcoming таблицы
+  - `get_upcoming_stats()` - статистика upcoming проектов
+  - `get_social_stats()` - статистика социальных ссылок
+  - `analyze_telegram_message()` - анализ Telegram сообщений
+- **Представления**:
+  - `crypto_stats` - общая статистика с социальными данными
+  - `upcoming_projects_stats` - статистика upcoming проектов
+  - `upcoming_soon` - ближайшие проекты
+  - `crypto_social_links` - социальные ссылки
+  - `telegram_stats` - статистика Telegram
+  - `crypto_without_social` - проекты без социальных ссылок
 
 ## Первый запуск
 
@@ -315,91 +345,40 @@ python3 clean_db.py
 1. **Очистка данных** (сохранить структуру таблиц)
 2. **Очистка OHLC таблиц** (удалить все OHLC таблицы)
 3. **⚠️ ПОЛНОЕ УДАЛЕНИЕ ВСЕХ ТАБЛИЦ**
-4. **🔧 ВОССТАНОВЛЕНИЕ СТРУКТУРЫ** (из init_db.sql) - НОВОЕ
+4. **🔧 ВОССТАНОВЛЕНИЕ СТРУКТУРЫ** (из init_db.sql)
 5. **🔄 ПЕРЕИНИЦИАЛИЗАЦИЯ** (удаление + восстановление)
 6. **Показать статистику**
 
-#### Различия между восстановлением и переинициализацией:
-
-**Пункт 4 - Восстановление структуры:**
-- ✅ Восстанавливает структуру из `init_db.sql`
-- ✅ **Сохраняет существующие данные**
-- ✅ Создает недостающие таблицы, функции, триггеры
-- ✅ **Безопасно** - не удаляет ничего
-- 🎯 **Используйте когда**: структура повреждена, но данные целы
-
-**Пункт 5 - Переинициализация:**
-- ⚠️ Полностью удаляет ВСЕ таблицы и данные
-- ⚠️ Затем восстанавливает структуру с нуля
-- ⚠️ **НЕОБРАТИМО** - все данные будут потеряны  
-- 🎯 **Используйте когда**: нужна полная очистка БД
-
-#### Практические сценарии:
-
-```bash
-# СЦЕНАРИЙ 1: После случайного удаления таблиц (данные есть в OHLC таблицах)
-python3 clean_db.py
-# Выберите пункт 4 - восстановит структуру, сохранит OHLC данные
-
-# СЦЕНАРИЙ 2: База "поломалась", но данные важны
-python3 clean_db.py  
-# Выберите пункт 4 - безопасное восстановление
-
-# СЦЕНАРИЙ 3: Нужна полностью чистая БД для тестов
-python3 clean_db.py
-# Выберите пункт 5 - полная переинициализация
-
-# СЦЕНАРИЙ 4: Очистить только данные, оставить структуру
-python3 clean_db.py
-# Выберите пункт 1 - очистка данных
-```
-
-#### Примеры использования:
-```bash
-# Быстрая статистика БД
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT 
-    COUNT(*) as total_coins,
-    COUNT(CASE WHEN coin_gecko_id IS NOT NULL THEN 1 END) as with_id,
-    COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) as with_ohlc
-FROM cryptocurrencies;
-"
-
-# Просмотр через представление
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT * FROM crypto_stats LIMIT 10;
-"
-
-# Восстановление структуры (безопасно)
-python3 clean_db.py  # выберите пункт 4
-
-# Полная переинициализация (ОПАСНО)
-python3 clean_db.py  # выберите пункт 5
-
-# Ручное создание OHLC таблицы
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT create_ohlc_table('BTC', '2024-01-01');
-"
-```
-
 ### 1. Пошаговый тест всех компонентов
 
-#### Этап 1: Парсинг новых монет
+#### Этап 1: Парсинг новых монет + социальные ссылки
 ```bash
 # Активировать venv если не активирован
 source venv/bin/activate
 
-# Запуск основного парсера
+# Запуск основного парсера (автоматически запустит и социальные ссылки)
 python3 parser.py
 ```
 
-#### Этап 2: Получение CoinGecko ID
+#### Этап 2: Парсинг upcoming ICO проектов
+```bash
+# Запуск парсера upcoming проектов
+python3 cryptoranc_upcoin_table.py
+```
+
+#### Этап 3: Поиск платформ для проектов (НОВОЕ)
+```bash
+# Запуск парсера платформ
+python3 cryptorank_platform.py
+```
+
+#### Этап 4: Получение CoinGecko ID
 ```bash
 # Запуск парсера ID (получает ID для монет без них)
 python3 parser_id.py
 ```
 
-#### Этап 3: Обновление OHLC данных
+#### Этап 5: Обновление OHLC данных
 ```bash
 # Запуск обновления OHLC
 python3 updater.py
@@ -412,22 +391,30 @@ docker exec -it crypto_db psql -U crypto_user -d crypto_db -c "
 SELECT 
     COUNT(*) as total_coins,
     COUNT(CASE WHEN coin_gecko_id IS NOT NULL THEN 1 END) as with_id,
-    COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) as with_ohlc
+    COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) as with_ohlc,
+    COUNT(CASE WHEN array_length(telegram_channels, 1) > 0 THEN 1 END) as with_telegram,
+    COUNT(CASE WHEN array_length(twitter_accounts, 1) > 0 THEN 1 END) as with_twitter
 FROM cryptocurrencies;
 "
 
-# Проверка последних добавленных монет
+# Проверка upcoming проектов
 docker exec -it crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT name, symbol, coin_gecko_id, added_date 
-FROM cryptocurrencies 
-ORDER BY added_date DESC 
-LIMIT 10;
+SELECT * FROM get_upcoming_stats();
+"
+
+# Проверка платформ
+docker exec -it crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT 
+    COUNT(*) as projects_with_platforms,
+    COUNT(DISTINCT jsonb_array_elements_text(launchpad)) as unique_platforms
+FROM cryptorank_upcoming 
+WHERE launchpad != '[]'::jsonb;
 "
 ```
 
 ### 3. Полный цикл через run.sh (опционально)
 ```bash
-# Запуск полного цикла (все 3 этапа) - для ручного использования
+# Запуск полного цикла (все этапы) - для ручного использования
 ./run.sh
 ```
 
@@ -438,61 +425,10 @@ LIMIT 10;
 nano cron_wrapper.sh
 ```
 
-Содержимое:
-```bash
-#!/bin/bash
-# Crypto Parser Cron Wrapper v2.0
-
-PROJECT_DIR="/home/$USER/projects/crypto-parser"
-cd "$PROJECT_DIR" || exit 1
-
-# Настройка окружения
-export PATH="/usr/local/bin:/usr/bin:/bin"
-source "$PROJECT_DIR/venv/bin/activate"
-
-# Настройки БД
-export DB_HOST="localhost"
-export DB_PORT="5432"
-export DB_NAME="crypto_db"
-export DB_USER="crypto_user"
-export DB_PASSWORD="crypto_password"
-
-# Создание директорий
-mkdir -p logs backups
-
-# Функция логирования
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-# Запуск команды
-case "$1" in
-    "parser")
-        log "Запуск парсера новых монет"
-        python3 parser.py
-        ;;
-    "parser_id")
-        log "Запуск получения CoinGecko ID"
-        python3 parser_id.py
-        ;;
-    "updater")
-        log "Запуск обновления OHLC"
-        python3 updater.py
-        ;;
-    "full")
-        log "Запуск полного цикла"
-        ./run.sh
-        ;;
-    "backup")
-        log "Создание резервной копии БД"
-        docker exec crypto_db pg_dump -U crypto_user crypto_db | gzip > "backups/crypto_db_$(date +%Y%m%d_%H%M%S).sql.gz"
-        ;;
-    *)
-        echo "Usage: $0 {parser|parser_id|updater|full|backup}"
-        exit 1
-        ;;
-esac
-```
+**ОБНОВЛЕННЫЙ** cron_wrapper.sh уже включает поддержку новых команд:
+- `upcoming` - парсинг upcoming ICO проектов
+- `social-only` - отдельный запуск социальных ссылок
+- `upcoming-stats` - детальная статистика upcoming проектов
 
 ### 2. Настройка прав
 ```bash
@@ -504,22 +440,25 @@ chmod +x cron_wrapper.sh
 crontab -e
 ```
 
-Добавьте **ОБНОВЛЕННОЕ** расписание:
+Добавьте **ОБНОВЛЕННОЕ** расписание для версии 3.0:
 ```bash
-# Crypto Parser Schedule v2.0
+# Crypto Parser Schedule v3.0
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
 # Переменные
 PROJECT_DIR=/home/user/projects/crypto-parser
 
-# ЭТАП 1: Парсинг новых монет - каждый час
+# ЭТАП 1: Парсинг новых монет + социальные ссылки - каждый час
 0 * * * * $PROJECT_DIR/cron_wrapper.sh parser >> $PROJECT_DIR/logs/parser.log 2>&1
 
-# ЭТАП 2: Получение CoinGecko ID - каждый час (со сдвигом 30 минут)
+# ЭТАП 2: Парсинг upcoming ICO проектов - каждые 6 часов
+30 */6 * * * $PROJECT_DIR/cron_wrapper.sh upcoming >> $PROJECT_DIR/logs/upcoming.log 2>&1
+
+# ЭТАП 3: Получение CoinGecko ID - каждый час (со сдвигом 30 минут)
 30 * * * * $PROJECT_DIR/cron_wrapper.sh parser_id >> $PROJECT_DIR/logs/parser_id.log 2>&1
 
-# ЭТАП 3: Обновление OHLC данных - каждые 4 часа
+# ЭТАП 4: Обновление OHLC данных - каждые 4 часа
 15 3,7,11,15,19,23 * * * $PROJECT_DIR/cron_wrapper.sh updater >> $PROJECT_DIR/logs/updater.log 2>&1
 
 # Резервное копирование БД - ежедневно в 4:30
@@ -531,8 +470,11 @@ PROJECT_DIR=/home/user/projects/crypto-parser
 # Очистка старых бэкапов - каждое воскресенье в 5:30
 30 5 * * 0 find $PROJECT_DIR/backups -name "*.sql.gz" -mtime +7 -delete
 
-# Статистика - дважды в день (утром и вечером)
-0 9,21 * * * docker exec crypto_db psql -U crypto_user -d crypto_db -c "SELECT 'Time: ' || NOW()::timestamp(0), 'Total: ' || COUNT(*), 'With ID: ' || COUNT(CASE WHEN coin_gecko_id IS NOT NULL THEN 1 END), 'With OHLC: ' || COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) FROM cryptocurrencies;" >> $PROJECT_DIR/logs/stats.log
+# Расширенная статистика - дважды в день (утром и вечером)
+0 9,21 * * * $PROJECT_DIR/cron_wrapper.sh stats >> $PROJECT_DIR/logs/stats.log
+
+# Детальная статистика upcoming проектов - ежедневно в 10:00
+0 10 * * * $PROJECT_DIR/cron_wrapper.sh upcoming-stats >> $PROJECT_DIR/logs/upcoming_stats.log
 
 # Проверка здоровья Docker - каждый час
 0 * * * * docker ps | grep crypto_db > /dev/null || docker-compose -f $PROJECT_DIR/docker-compose.yml up -d >> $PROJECT_DIR/logs/docker_health.log 2>&1
@@ -554,17 +496,17 @@ sudo tail -f /var/log/syslog | grep CRON
 # Логи парсера новых монет
 tail -f logs/parser.log
 
+# Логи upcoming проектов
+tail -f logs/upcoming.log
+
 # Логи получения ID
 tail -f logs/parser_id.log
 
 # Логи обновления OHLC
 tail -f logs/updater.log
 
-# Логи полного цикла
-tail -f logs/full.log
-
-# Статистика
-tail -f logs/stats.log
+# Статистика upcoming проектов
+tail -f logs/upcoming_stats.log
 
 # Логи Docker
 docker-compose logs -f
@@ -590,39 +532,52 @@ FROM information_schema.tables
 WHERE table_schema = 'public';
 "
 
-# Детальная статистика монет
+# Расширенная статистика с новыми данными
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
 SELECT 
     COUNT(*) as total_coins,
     COUNT(CASE WHEN coin_gecko_id IS NOT NULL THEN 1 END) as with_coingecko_id,
     COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) as with_ohlc_table,
-    COUNT(CASE WHEN added_date::date = CURRENT_DATE THEN 1 END) as added_today,
-    COUNT(CASE WHEN added_date::date >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as added_last_week
+    COUNT(CASE WHEN array_length(telegram_channels, 1) > 0 THEN 1 END) as with_telegram,
+    COUNT(CASE WHEN array_length(twitter_accounts, 1) > 0 THEN 1 END) as with_twitter,
+    COUNT(CASE WHEN social_links_updated IS NOT NULL THEN 1 END) as social_updated,
+    COUNT(CASE WHEN added_date::date = CURRENT_DATE THEN 1 END) as added_today
 FROM cryptocurrencies;
 "
 
-# Статистика OHLC таблиц
+# Статистика upcoming проектов
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT COUNT(*) as ohlc_tables_count
-FROM information_schema.tables 
-WHERE table_name LIKE 'ohlc_%';
+SELECT * FROM get_upcoming_stats();
+"
+
+# Статистика социальных ссылок
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT * FROM get_social_stats();
 "
 ```
 
-### 3. Расширенное резервное копирование
+### 3. Новые команды для мониторинга версии 3.0
 ```bash
-# Полное резервное копирование с метаданными
-docker exec crypto_db pg_dump -U crypto_user -v -F c -f /tmp/full_backup.dump crypto_db
-docker cp crypto_db:/tmp/full_backup.dump backups/full_backup_$(date +%Y%m%d).dump
+# Проверка upcoming проектов на этой неделе
+./cron_wrapper.sh upcoming-stats
 
-# Резервное копирование только схемы
-docker exec crypto_db pg_dump -U crypto_user -s crypto_db | gzip > backups/schema_backup_$(date +%Y%m%d).sql.gz
+# Проверка социальных ссылок
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT * FROM crypto_social_links LIMIT 10;
+"
 
-# Резервное копирование только данных
-docker exec crypto_db pg_dump -U crypto_user -a crypto_db | gzip > backups/data_backup_$(date +%Y%m%d).sql.gz
+# Проверка Telegram статистики
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT * FROM telegram_stats LIMIT 10;
+"
+
+# Проверка проектов без социальных ссылок
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT * FROM crypto_without_social LIMIT 10;
+"
 ```
 
-### 4. Скрипт мониторинга состояния
+### 4. Скрипт мониторинга состояния (ОБНОВЛЕН)
 ```bash
 nano monitor.sh
 ```
@@ -630,12 +585,12 @@ nano monitor.sh
 Содержимое:
 ```bash
 #!/bin/bash
-# Crypto Parser Monitor Script
+# Crypto Parser Monitor Script v3.0
 
 PROJECT_DIR="/home/$USER/projects/crypto-parser"
 cd "$PROJECT_DIR" || exit 1
 
-echo "=== CRYPTO PARSER STATUS ==="
+echo "=== CRYPTO PARSER STATUS V3.0 ==="
 echo "Время: $(date)"
 echo
 
@@ -651,28 +606,21 @@ SELECT
     'Всего монет: ' || COUNT(*) ||
     ', С ID: ' || COUNT(CASE WHEN coin_gecko_id IS NOT NULL THEN 1 END) ||
     ', С OHLC: ' || COUNT(CASE WHEN ohlc_table_name IS NOT NULL THEN 1 END) ||
+    ', С Telegram: ' || COUNT(CASE WHEN array_length(telegram_channels, 1) > 0 THEN 1 END) ||
+    ', С Twitter: ' || COUNT(CASE WHEN array_length(twitter_accounts, 1) > 0 THEN 1 END) ||
     ', Добавлено сегодня: ' || COUNT(CASE WHEN added_date::date = CURRENT_DATE THEN 1 END)
 FROM cryptocurrencies;
 " 2>/dev/null || echo "❌ БД недоступна"
-echo
 
-# Размер БД
-echo "💾 Размер БД:"
+# Upcoming проекты
+echo
+echo "🚀 Upcoming проекты:"
 docker exec crypto_db psql -U crypto_user -d crypto_db -t -c "
-SELECT pg_size_pretty(pg_database_size('crypto_db'));
-" 2>/dev/null || echo "❌ Не удалось получить размер БД"
-echo
+SELECT 'Всего: ' || total_projects || ', Активных: ' || active_projects || ', На этой неделе: ' || this_week
+FROM get_upcoming_stats();
+" 2>/dev/null || echo "❌ Не удалось получить статистику upcoming"
 
-# Последние логи
-echo "📋 Последние события:"
-if [ -f logs/stats.log ]; then
-    tail -3 logs/stats.log
-else
-    echo "Логи статистики не найдены"
-fi
 echo
-
-# Использование диска
 echo "💿 Использование диска:"
 df -h . | tail -1
 echo
@@ -699,13 +647,17 @@ pip install -r requirements.txt --upgrade
 ls -la *.py
 ```
 
-### 2. Применение изменений БД (если есть)
+### 2. Применение изменений БД для версии 3.0
 ```bash
-# Проверка структуры БД
+# Проверка текущей структуры БД
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "\dt"
 
-# Применение новых миграций (если необходимо)
-# docker exec -i crypto_db psql -U crypto_user crypto_db < new_migration.sql
+# Применение обновлений структуры (безопасно)
+docker exec -i crypto_db psql -U crypto_user -d crypto_db < init_db.sql
+
+# Проверка новых представлений и функций
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "\dv"
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "\df"
 ```
 
 ### 3. Перезапуск сервисов
@@ -713,205 +665,176 @@ docker exec crypto_db psql -U crypto_user -d crypto_db -c "\dt"
 # Перезапуск контейнеров
 docker-compose restart
 
-# Тестовый запуск компонентов
+# Тестовый запуск новых компонентов
 source venv/bin/activate
-python3 parser.py --test
-python3 parser_id.py --test
-python3 updater.py --test
+python3 cryptoranc_upcoin_table.py  # Тест upcoming
+python3 cryptorank_platform.py      # Тест платформ
+python3 parser_coingecko_social.py  # Тест социальных ссылок
 ```
 
 ## Решение проблем
 
-### 1. Проблемы с parser_id.py
+### 1. Проблемы с новыми парсерами
+
+#### cryptorank_platform.py
+```bash
+# Ошибки с Selenium или Chrome
+google-chrome --version
+chromedriver --version
+
+# Проблемы с таймаутами
+# Увеличьте max_retries в коде или:
+# Проверьте логи:
+tail -f logs/platform.log
+
+# Ручной тест
+python3 cryptorank_platform.py
+```
+
+#### cryptoranc_upcoin_table.py
+```bash
+# Проблемы с парсингом таблицы
+# Проверьте доступность сайта:
+curl -I https://cryptorank.io/upcoming-ico
+
+# Ручной тест
+python3 cryptoranc_upcoin_table.py
+```
+
+#### parser_coingecko_social.py
 ```bash
 # Ошибки Rate Limit CoinGecko
-# Увеличьте задержки в parser_id.py:
-# REQUEST_DELAY = 10  # до 15-20
-# RETRY_DELAY = 60   # до 120
+# Увеличьте задержки или проверьте API:
+curl "https://api.coingecko.com/api/v3/coins/bitcoin"
 
-# Проблемы с поиском монет
-# Проверьте логи:
-tail -f logs/parser_id.log
-
-# Ручной тест поиска ID
-python3 -c "
-import asyncio
-from parser_id import *
-asyncio.run(main())
-"
+# Ручной тест
+python3 parser_coingecko_social.py
 ```
 
-### 2. Проблемы с updater.py (OHLC)
+### 2. Проблемы с базой данных
 ```bash
-# Проверка API доступности
-curl "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=14"
-
-# Проверка конкретной монеты
+# Проверка новых таблиц
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT name, symbol, coin_gecko_id 
-FROM cryptocurrencies 
-WHERE coin_gecko_id IS NOT NULL 
-LIMIT 1;
+SELECT table_name, table_type 
+FROM information_schema.tables 
+WHERE table_schema = 'public' 
+ORDER BY table_name;
 "
 
-# Ручной тест обновления
-python3 -c "
-import asyncio
-from updater import *
-asyncio.run(main())
-"
-```
-
-### 3. Проблемы с базой данных
-```bash
-# Проверка соединений
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT count(*) FROM pg_stat_activity WHERE datname='crypto_db';
-"
-
-# Если БД повреждена или очищена - безопасное восстановление
-python3 clean_db.py  # выберите пункт 4 (ВОССТАНОВЛЕНИЕ СТРУКТУРЫ)
-
-# Или через Docker напрямую
+# Если отсутствует таблица cryptorank_upcoming
 docker exec -i crypto_db psql -U crypto_user -d crypto_db < init_db.sql
 
-# Анализ размера таблиц
+# Проверка JSON полей
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT 
-    schemaname,
-    tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size
-FROM pg_tables 
-WHERE schemaname = 'public'
-ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
-LIMIT 20;
-"
-
-# Пересоздание индексов (если нужно)
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "REINDEX DATABASE crypto_db;"
-```
-
-### 4. Оптимизация производительности
-```bash
-# Мониторинг процессов Python
-ps aux | grep python | grep -E "(parser|updater)"
-
-# Настройка PostgreSQL для лучшей производительности
-docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-ALTER SYSTEM SET shared_buffers = '256MB';
-ALTER SYSTEM SET work_mem = '4MB';
-ALTER SYSTEM SET maintenance_work_mem = '64MB';
-SELECT pg_reload_conf();
+SELECT project_name, launchpad 
+FROM cryptorank_upcoming 
+WHERE launchpad != '[]'::jsonb 
+LIMIT 5;
 "
 ```
 
-## Безопасность и оптимизация
-
-### 1. Настройка firewall
+### 3. Проблемы с Chrome/Selenium
 ```bash
-# Установка ufw
-sudo apt install ufw
+# Переустановка Chrome
+sudo apt remove google-chrome-stable
+sudo apt autoremove
+# Затем повторите установку из раздела "Установка зависимостей"
 
-# Базовые правила
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw allow 22/tcp
-
-# Включение firewall
-sudo ufw enable
+# Проверка работы в headless режиме
+python3 -c "
+from selenium import webdriver
+options = webdriver.ChromeOptions()
+options.add_argument('--headless=new')
+options.add_argument('--no-sandbox')
+driver = webdriver.Chrome(options=options)
+driver.get('https://google.com')
+print('Chrome works!')
+driver.quit()
+"
 ```
 
-### 2. Защита БД и оптимизация
-```bash
-# Изменение паролей в docker-compose.yml
-# Настройка логирования PostgreSQL
-# Ограничение подключений
+## Новые возможности версии 3.0
 
-# Создание .pgpass для безопасности
-echo "localhost:5432:crypto_db:crypto_user:crypto_password" > ~/.pgpass
-chmod 600 ~/.pgpass
+### 1. Парсинг upcoming ICO проектов
+```bash
+# Ручной запуск
+python3 cryptoranc_upcoin_table.py
+
+# Через cron wrapper
+./cron_wrapper.sh upcoming
+
+# Статистика
+./cron_wrapper.sh upcoming-stats
 ```
 
-### 3. Мониторинг логов и алертов
+### 2. Автоматический поиск платформ
 ```bash
-# Создание скрипта проверки ошибок
-nano check_errors.sh
+# Ручной запуск
+python3 cryptorank_platform.py
+
+# Проверка найденных платформ
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT project_name, launchpad 
+FROM cryptorank_upcoming 
+WHERE launchpad != '[]'::jsonb;
+"
 ```
 
-Содержимое:
+### 3. Расширенные социальные ссылки
 ```bash
-#!/bin/bash
-# Проверка критических ошибок
-
-LOG_DIR="/home/$USER/projects/crypto-parser/logs"
-ERRORS_FOUND=0
-
-# Проверка критических ошибок
-if grep -q "CRITICAL\|FATAL\|ERROR.*database" "$LOG_DIR"/*.log 2>/dev/null; then
-    echo "🚨 Обнаружены критические ошибки!"
-    ERRORS_FOUND=1
-fi
-
-# Проверка доступности БД
-if ! docker exec crypto_db pg_isready -U crypto_user > /dev/null 2>&1; then
-    echo "🚨 База данных недоступна!"
-    ERRORS_FOUND=1
-fi
-
-# Уведомление (можно настроить email/telegram)
-if [ $ERRORS_FOUND -eq 1 ]; then
-    echo "Требуется внимание администратора"
-    # mail -s "Crypto Parser Alert" admin@domain.com < /tmp/alert.txt
-fi
+# Проверка социальных данных
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT symbol, name, 
+       array_length(telegram_channels, 1) as telegram_count,
+       array_length(twitter_accounts, 1) as twitter_count,
+       social_links_updated
+FROM cryptocurrencies 
+WHERE social_links_updated IS NOT NULL 
+ORDER BY social_links_updated DESC 
+LIMIT 10;
+"
 ```
 
 ## Полезные команды для управления
 
 ```bash
-# === УПРАВЛЕНИЕ ПАРСЕРОМ ===
+# === НОВЫЕ КОМАНДЫ ВЕРСИИ 3.0 ===
 
-# Статус всех компонентов
-./monitor.sh
+# Статистика upcoming проектов
+./cron_wrapper.sh upcoming-stats
 
-# Принудительный запуск отдельных этапов
-./cron_wrapper.sh parser     # Только парсинг новых монет
-./cron_wrapper.sh parser_id  # Только получение ID
-./cron_wrapper.sh updater    # Только обновление OHLC
+# Запуск только социальных ссылок
+./cron_wrapper.sh social-only
 
-# Ручное резервное копирование
-./cron_wrapper.sh backup
+# Парсинг upcoming проектов
+./cron_wrapper.sh upcoming
 
-# === УПРАВЛЕНИЕ ДАННЫМИ ===
+# === МОНИТОРИНГ НОВЫХ ДАННЫХ ===
 
-# Поиск монеты в БД
+# Проекты запускающиеся на этой неделе
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-SELECT * FROM cryptocurrencies WHERE name ILIKE '%bitcoin%' OR symbol ILIKE '%btc%';
+SELECT * FROM upcoming_soon WHERE days_until_launch <= 7;
 "
 
-# Очистка монет без ID старше 30 дней
+# Топ проектов по социальным ссылкам
 docker exec crypto_db psql -U crypto_user -d crypto_db -c "
-DELETE FROM cryptocurrencies 
-WHERE coin_gecko_id IS NULL 
-AND added_date < NOW() - INTERVAL '30 days';
+SELECT * FROM crypto_social_links ORDER BY total_social_links DESC LIMIT 10;
 "
 
-# === ДИАГНОСТИКА ===
+# Проекты без социальных ссылок
+docker exec crypto_db psql -U crypto_user -d crypto_db -c "
+SELECT * FROM crypto_without_social LIMIT 10;
+"
 
-# Проверка последней активности парсеров
-ls -la logs/*.log
-
-# Проверка активных Python процессов
-pgrep -f "python.*parser" -l
-
-# Быстрая диагностика системы
-echo "=== СИСТЕМА ==="
-uptime
-df -h
-echo "=== СИСТЕМА ==="
-docker ps
-echo "=== ПОСЛЕДНИЕ ЛОГИ ==="
-tail -5 logs/*.log
+# Очистка колонки launchpad (если нужно)
+python3 -c "
+import psycopg2
+conn = psycopg2.connect(host='localhost', port=5432, database='crypto_db', user='crypto_user', password='crypto_password')
+cursor = conn.cursor()
+cursor.execute('UPDATE cryptorank_upcoming SET launchpad = \\'[]\\';')
+conn.commit()
+print('Launchpad cleared')
+"
 ```
 
 ## Контакты и поддержка
@@ -920,19 +843,19 @@ tail -5 logs/*.log
 1. Проверьте логи всех компонентов в директории `logs/`
 2. Запустите `./monitor.sh` для общей диагностики
 3. Проверьте статус Docker контейнеров
-4. Убедитесь, что все зависимости установлены
-5. Проверьте доступность API CoinGecko
+4. Убедитесь, что Chrome и ChromeDriver установлены корректно
+5. Проверьте доступность API CoinGecko и CryptoRank
 6. Используйте отдельные компоненты для локализации проблемы
 
-**Новые файлы в v2.0:**
-- `parser_id.py` - получение CoinGecko ID через API
-- `updater.py` - обновленный с прямым OHLC API
-- Улучшенный `run.sh` с тремя этапами
-- Расширенное cron расписание
-- Улучшенный мониторинг
+**Новые файлы в v3.0:**
+- `cryptorank_platform.py` - автоматический поиск платформ
+- `cryptoranc_upcoin_table.py` - парсер upcoming ICO проектов  
+- `parser_coingecko_social.py` - расширенные социальные ссылки
+- Обновленный `cron_wrapper.sh` с новыми командами
+- Расширенный `init_db.sql` с поддержкой upcoming проектов
 
 ---
 
-**Версия**: 2.0  
-**Дата обновления**: 2025  
+**Версия**: 3.0  
+**Дата обновления**: Январь 2025  
 **Автор**: Crypto Parser Team
