@@ -21,22 +21,19 @@ DB_CONFIG = {
     'password': os.environ.get('DB_PASSWORD', 'crypto_password')
 }
 
-
 def setup_driver():
     """Настройка браузера с включёнными стилями и шрифтами"""
     print("🔧 Запуск браузера...")
     options = Options()
-
-    # Важно: включаем стили и шрифты, иначе легенда не отображается
     chrome_prefs = {
         "profile.default_content_settings": {
-            "images": 2,      # Можно отключить
-            "javascript": 1   # Обязательно включено
+            "images": 2,
+            "javascript": 1
         },
         "profile.managed_default_content_settings": {
             "images": 2,
-            "stylesheets": 1,  # ✅ ВКЛЮЧЕНО
-            "fonts": 1,        # ✅ ВКЛЮЧЕНО
+            "stylesheets": 1,  # Важно для отображения легенды
+            "fonts": 1,
             "javascript": 1,
             "plugins": 2,
             "popups": 2,
@@ -44,21 +41,15 @@ def setup_driver():
             "notifications": 2
         }
     }
-
-    # Уберите комментарий, чтобы видеть браузер (для отладки)
-    # options.add_argument('--headless=new')
-
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-
     options.add_experimental_option("prefs", chrome_prefs)
     driver = webdriver.Chrome(options=options)
     driver.implicitly_wait(10)
     print("   ✅ Браузер запущен (стили и шрифты включены)")
     return driver
-
 
 def get_projects_from_db(limit=20):
     """Получаем проекты из таблицы cryptorank_upcoming"""
@@ -85,11 +76,9 @@ def get_projects_from_db(limit=20):
         print(f"❌ Ошибка БД: {e}")
         return []
 
-
 def is_ico_page(url):
     """Проверяем, что это ICO-страница"""
     return '/ico/' in url.lower()
-
 
 def find_tokenomics_section(driver):
     """Ищем секцию Tokenomics"""
@@ -105,7 +94,6 @@ def find_tokenomics_section(driver):
     except Exception as e:
         print(f"   ⚠️ Секция 'Tokenomics' не найдена: {e}")
         return False
-
 
 def parse_initial_values(driver):
     """Парсим 'Initial values'"""
@@ -126,7 +114,6 @@ def parse_initial_values(driver):
     except Exception as e:
         print(f"   ⚠️ Не удалось распарсить Initial values: {e}")
     return values if values else None
-
 
 def parse_token_allocation(driver):
     """Парсим 'Token allocation'"""
@@ -150,76 +137,93 @@ def parse_token_allocation(driver):
         print(f"   ⚠️ Не удалось распарсить Token allocation: {e}")
     return allocation if allocation else None
 
-
 def parse_distribution_chart(driver):
-    """Парсим распределение из <ul class='sc-3b4c91db-0'> с отладкой"""
-    distribution = []
+    """Парсим распределение из <ul class='sc-3b4c91db-0'>"""
+    distribution = {}
     try:
-        # Явное ожидание появления списка
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.XPATH, "//ul[contains(@class, 'sc-3b4c91db-0')]"))
         )
-        # Прокрутка к секции
         tokenomics = driver.find_element(By.XPATH, "//h2[contains(text(), 'Tokenomics')]")
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tokenomics)
         time.sleep(2)
 
-        # Поиск списка
         list_container = driver.find_element(By.XPATH, "//ul[contains(@class, 'sc-3b4c91db-0')]")
         items = list_container.find_elements(By.XPATH, ".//li")
-        print(f"   🎯 Найдено {len(items)} элементов в легенде")
 
-        for i, item in enumerate(items):
+        for item in items:
             try:
-                # Прокрутка к элементу
                 driver.execute_script("arguments[0].scrollIntoView({block: 'nearest'});", item)
-                time.sleep(0.5)
-
-                # Поиск категории
+                time.sleep(0.3)
                 category_elem = item.find_element(By.XPATH, ".//p[contains(@class, 'hMaTTx')]")
-                category = category_elem.text.strip()
-
-                # Поиск процента
                 percentage_elem = item.find_element(By.XPATH, ".//div[contains(@class, 'fsLhYV')]//span")
+                category = category_elem.text.strip()
                 percentage = percentage_elem.text.strip()
-
-                print(f"   🔎 [{i+1}] Категория: '{category}', Процент: '{percentage}'")
-
                 if category and percentage:
-                    distribution.append({
-                        'category': category,
-                        'percentage': percentage
-                    })
-                else:
-                    print(f"   ⚠️ [{i+1}] Пропущено: пустой текст")
+                    distribution[category] = percentage
             except Exception as e:
-                print(f"   ❌ [{i+1}] Ошибка: {e}")
+                print(f"   ❌ Ошибка при парсинге легенды: {e}")
                 continue
 
         if distribution:
             print(f"   ✅ Успешно: найдено {len(distribution)} категорий распределения")
             return distribution
-        else:
-            print("   ⚠️ Все элементы найдены, но текст не извлечён")
     except Exception as e:
         print(f"   ⚠️ Не удалось найти легенду распределения: {e}")
-    return None
+    return {}
 
+# --- ✅ НОВАЯ ФУНКЦИЯ: Сохранение в БД ---
+def save_tokenomics_to_db(tokenomics_data, db_config):
+    """
+    Сохраняет токеномику в таблицу cryptorank_tokenomics
+    :param tokenomics_data: dict с ключами 'project_name', 'distribution' и др.
+    :param db_config: параметры подключения к БД
+    """
+    try:
+        conn = psycopg2.connect(**db_config)
+        cursor = conn.cursor()
 
+        project_name = tokenomics_data['project_name']
+        distribution = tokenomics_data.get('distribution', {})
+        initial_values = tokenomics_data.get('initial_values', {})
+        token_allocation = tokenomics_data.get('token_allocation', {})
+
+        # Формируем JSONB объект
+        tokenomics_json = {
+            "distribution": distribution,
+            "initial_values": initial_values,
+            "token_allocation": token_allocation,
+            "source": "cryptorank",
+            "scraped_at": tokenomics_data['scraped_at']
+        }
+
+        # UPSERT: вставка или обновление
+        upsert_query = """
+        INSERT INTO cryptorank_tokenomics (project_name, tokenomics)
+        VALUES (%s, %s)
+        ON CONFLICT (project_name) 
+        DO UPDATE SET tokenomics = EXCLUDED.tokenomics, updated_at = CURRENT_TIMESTAMP;
+        """
+        cursor.execute(upsert_query, (project_name, json.dumps(tokenomics_json, ensure_ascii=False)))
+        conn.commit()
+        print(f"✅ Токеномика сохранена в БД: {project_name}")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения в БД: {e}")
+
+# --- ОСНОВНАЯ ФУНКЦИЯ ---
 def scan_project_tokenomics(driver, project, max_retries=3):
     """Парсим токеномику с одной страницы"""
     for attempt in range(max_retries):
         try:
             print(f"\n🔍 Парсим токеномику: {project['name']} (попытка {attempt + 1}/{max_retries})")
-
             if not is_ico_page(project['url']):
                 print("   ⚠️ Пропуск: не ICO-страница")
                 return None
 
             print(f"🌐 Открываем: {project['url']}")
             driver.get(project['url'])
-
-            # Явное ожидание загрузки страницы
             WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
             if not find_tokenomics_section(driver):
@@ -233,7 +237,6 @@ def scan_project_tokenomics(driver, project, max_retries=3):
                 'ico_url': project['url'],
                 'scraped_at': datetime.now().isoformat()
             }
-
             data['initial_values'] = parse_initial_values(driver)
             data['token_allocation'] = parse_token_allocation(driver)
             data['distribution'] = parse_distribution_chart(driver)
@@ -250,7 +253,6 @@ def scan_project_tokenomics(driver, project, max_retries=3):
                 print(f"   💥 Все попытки исчерпаны")
     return None
 
-
 def save_to_json(data_list):
     """Сохраняем результат в JSON"""
     result = {
@@ -266,11 +268,9 @@ def save_to_json(data_list):
     print(f"\n✅ Данные сохранены в: {filename}")
     return filename
 
-
 def main():
     print("📊 ПАРСИНГ ТОКЕНОМИКИ С ICO-СТРАНИЦ (из БД)")
     print("=" * 60)
-
     driver = setup_driver()
     all_tokenomics = []
 
@@ -285,7 +285,9 @@ def main():
             data = scan_project_tokenomics(driver, project)
             if data is not None:
                 all_tokenomics.append(data)
-            time.sleep(2)  # Антибан
+                # ✅ Сохраняем в БД сразу после парсинга
+                save_tokenomics_to_db(data, DB_CONFIG)
+            time.sleep(2)
 
     except Exception as e:
         print(f"❌ Критическая ошибка: {e}")
@@ -293,10 +295,9 @@ def main():
         driver.quit()
         print("\n🔒 Браузер закрыт")
 
-    # Сохранение в JSON
+    # Сохранение в JSON (опционально)
     if all_tokenomics:
         save_to_json(all_tokenomics)
-
         print(f"\n📋 Пример данных:")
         ex = all_tokenomics[0]
         print(f"  🪙 {ex['project_name']}")
@@ -305,11 +306,10 @@ def main():
         if ex['token_allocation']:
             print(f"     📦 {ex['token_allocation']}")
         if ex['distribution']:
-            top = ", ".join([f"{d['category']}({d['percentage']})" for d in ex['distribution'][:3]])
+            top = ", ".join([f"{k}({v})" for k, v in list(ex['distribution'].items())[:3]])
             print(f"     🎯 {top}")
     else:
         print("❌ Ничего не найдено.")
-
 
 if __name__ == "__main__":
     main()

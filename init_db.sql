@@ -1,121 +1,17 @@
--- Crypto Parser Database Schema with Telegram and Social Links Support
--- БЕЗ ДАТ В ИМЕНАХ ТАБЛИЦ
+-- Удаляем все существующие представления перед пересозданием
+DROP VIEW IF EXISTS tokenomics_detailed CASCADE;
+DROP VIEW IF EXISTS tokenomics_summary CASCADE;
+DROP VIEW IF EXISTS crypto_issues CASCADE;
+DROP VIEW IF EXISTS crypto_without_social CASCADE;
+DROP VIEW IF EXISTS active_telegram_channels CASCADE;
+DROP VIEW IF EXISTS telegram_stats CASCADE;
+DROP VIEW IF EXISTS crypto_social_links CASCADE;
+DROP VIEW IF EXISTS upcoming_soon CASCADE;
+DROP VIEW IF EXISTS upcoming_projects_stats CASCADE;
+DROP VIEW IF EXISTS crypto_stats CASCADE;
 
--- Основная таблица криптовалют
-CREATE TABLE IF NOT EXISTS cryptocurrencies (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    symbol VARCHAR(50) NOT NULL,
-    chain VARCHAR(100),
-    price VARCHAR(100),
-    change_24h VARCHAR(50),
-    market_cap VARCHAR(100),
-    fdv VARCHAR(100),
-    added_date DATE,
-    added_raw VARCHAR(100),
-    coin_gecko_id VARCHAR(255),
-    ohlc_table_name VARCHAR(100),
-    telegram_table_name VARCHAR(100),  -- имя таблицы с Telegram данными
-    telegram_message_count INTEGER DEFAULT 0,  -- количество сообщений
-    telegram_last_parsed TIMESTAMP,  -- последний парсинг сообщений
-
-    -- Социальные ссылки (добавляется parser_coingecko_social.py)
-    telegram_channels TEXT[],  -- список Telegram каналов
-    twitter_accounts TEXT[],   -- список Twitter аккаунтов
-    discord_links TEXT[],      -- список Discord серверов
-    reddit_communities TEXT[],  -- список Reddit сообществ
-    github_links TEXT[],       -- список GitHub репозиториев
-    official_websites TEXT[],  -- список официальных сайтов
-    instagram_accounts TEXT[], -- список Instagram аккаунтов
-    social_links_updated TIMESTAMP,  -- когда обновлены социальные ссылки
-
-    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(symbol)
-);
-
--- Новая таблица для upcoming ICO проектов
-CREATE TABLE IF NOT EXISTS cryptorank_upcoming (
-    id SERIAL PRIMARY KEY,
-    row_index INTEGER,
-
-    -- Информация о проекте
-    project_name VARCHAR(255) NOT NULL,
-    project_symbol VARCHAR(100),
-    project_url VARCHAR(500) NOT NULL UNIQUE,
-
-    -- Данные проекта
-    project_type VARCHAR(100),  -- IDO, ICO, Private и т.д.
-    initial_cap VARCHAR(100),   -- начальная капитализация
-    ido_raise VARCHAR(100),     -- сумма IDO
-    launch_date DATE,           -- дата запуска в формате YYYY-MM-DD
-    launch_date_original VARCHAR(50), -- оригинальная дата как была спаршена
-    moni_score VARCHAR(50),     -- рейтинг Moni
-
-    -- Массивы для будущих данных
-    investors JSONB DEFAULT '[]'::jsonb,   -- список инвесторов
-    launchpad JSONB DEFAULT '[]'::jsonb,   -- список launchpad платформ
-
-    -- Метаданные
-    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    is_active BOOLEAN DEFAULT TRUE,
-
-    -- Индексы
-    CONSTRAINT unique_project_url UNIQUE(project_url)
-);
-
--- Индексы для основной таблицы
-CREATE INDEX IF NOT EXISTS idx_crypto_symbol ON cryptocurrencies(symbol);
-CREATE INDEX IF NOT EXISTS idx_crypto_added_date ON cryptocurrencies(added_date);
-CREATE INDEX IF NOT EXISTS idx_crypto_gecko_id ON cryptocurrencies(coin_gecko_id);
-CREATE INDEX IF NOT EXISTS idx_crypto_ohlc_table ON cryptocurrencies(ohlc_table_name);
-CREATE INDEX IF NOT EXISTS idx_crypto_chain ON cryptocurrencies(chain);
-CREATE INDEX IF NOT EXISTS idx_crypto_telegram_table ON cryptocurrencies(telegram_table_name);
-CREATE INDEX IF NOT EXISTS idx_crypto_market_cap ON cryptocurrencies(market_cap);
-CREATE INDEX IF NOT EXISTS idx_crypto_social_updated ON cryptocurrencies(social_links_updated);
-
--- Индексы для таблицы upcoming проектов
-CREATE INDEX IF NOT EXISTS idx_upcoming_symbol ON cryptorank_upcoming(project_symbol);
-CREATE INDEX IF NOT EXISTS idx_upcoming_type ON cryptorank_upcoming(project_type);
-CREATE INDEX IF NOT EXISTS idx_upcoming_launch_date ON cryptorank_upcoming(launch_date);
-CREATE INDEX IF NOT EXISTS idx_upcoming_parsed_at ON cryptorank_upcoming(parsed_at);
-CREATE INDEX IF NOT EXISTS idx_upcoming_active ON cryptorank_upcoming(is_active);
-CREATE INDEX IF NOT EXISTS idx_upcoming_moni_score ON cryptorank_upcoming(moni_score);
-
--- Функция для обновления last_updated_at
-CREATE OR REPLACE FUNCTION update_last_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.last_updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Функция для обновления updated_at в upcoming таблице
-CREATE OR REPLACE FUNCTION update_upcoming_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Триггер обновления времени для основной таблицы
-DROP TRIGGER IF EXISTS update_crypto_last_updated ON cryptocurrencies;
-CREATE TRIGGER update_crypto_last_updated
-    BEFORE UPDATE ON cryptocurrencies
-    FOR EACH ROW
-    EXECUTE FUNCTION update_last_updated_at();
-
--- Триггер обновления времени для upcoming таблицы
-DROP TRIGGER IF EXISTS update_upcoming_updated ON cryptorank_upcoming;
-CREATE TRIGGER update_upcoming_updated
-    BEFORE UPDATE ON cryptorank_upcoming
-    FOR EACH ROW
-    EXECUTE FUNCTION update_upcoming_updated_at();
-
--- Представление для удобного просмотра с Telegram и социальными данными
+-- Пересоздаем все представления
+-- Представление: общая статистика криптовалют
 CREATE OR REPLACE VIEW crypto_stats AS
 SELECT
     c.id,
@@ -138,22 +34,18 @@ SELECT
     c.last_updated_at,
     CASE
         WHEN c.ohlc_table_name IS NOT NULL THEN
-            (SELECT COUNT(*)
-             FROM information_schema.tables
-             WHERE table_name = c.ohlc_table_name)
+            (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = c.ohlc_table_name)
         ELSE 0
     END as ohlc_table_exists,
     CASE
         WHEN c.telegram_table_name IS NOT NULL THEN
-            (SELECT COUNT(*)
-             FROM information_schema.tables
-             WHERE table_name = c.telegram_table_name)
+            (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = c.telegram_table_name)
         ELSE 0
     END as telegram_table_exists
 FROM cryptocurrencies c
 ORDER BY c.first_seen_at DESC;
 
--- Представление для upcoming проектов
+-- Представление: статистика upcoming проектов
 CREATE OR REPLACE VIEW upcoming_projects_stats AS
 SELECT
     project_name,
@@ -167,8 +59,7 @@ SELECT
     parsed_at,
     updated_at,
     CASE
-        WHEN launch_date IS NOT NULL THEN
-            EXTRACT(EPOCH FROM (launch_date::timestamp - CURRENT_TIMESTAMP))/86400
+        WHEN launch_date IS NOT NULL THEN EXTRACT(EPOCH FROM (launch_date::timestamp - CURRENT_TIMESTAMP))/86400
         ELSE NULL
     END as days_until_launch,
     CASE
@@ -182,7 +73,7 @@ FROM cryptorank_upcoming
 WHERE is_active = TRUE
 ORDER BY launch_date ASC NULLS LAST;
 
--- Представление для активных upcoming проектов с близкими датами
+-- Представление: ближайшие запуски
 CREATE OR REPLACE VIEW upcoming_soon AS
 SELECT
     project_name,
@@ -200,7 +91,7 @@ WHERE is_active = TRUE
   AND launch_date <= CURRENT_DATE + INTERVAL '30 days'
 ORDER BY launch_date ASC;
 
--- Представление для социальных ссылок
+-- Представление: социальные ссылки
 CREATE OR REPLACE VIEW crypto_social_links AS
 SELECT
     c.id,
@@ -224,8 +115,7 @@ SELECT
         COALESCE(array_length(c.instagram_accounts, 1), 0)
     ) as total_social_links,
     CASE
-        WHEN c.social_links_updated IS NOT NULL THEN
-            EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.social_links_updated))/3600
+        WHEN c.social_links_updated IS NOT NULL THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.social_links_updated))/3600
         ELSE NULL
     END as hours_since_updated
 FROM cryptocurrencies c
@@ -239,7 +129,7 @@ WHERE
     c.instagram_accounts IS NOT NULL
 ORDER BY total_social_links DESC;
 
--- Представление для мониторинга Telegram данных
+-- Представление: мониторинг Telegram
 CREATE OR REPLACE VIEW telegram_stats AS
 SELECT
     c.symbol,
@@ -249,25 +139,19 @@ SELECT
     c.telegram_channels,
     c.telegram_last_parsed,
     CASE
-        WHEN c.telegram_last_parsed IS NOT NULL THEN
-            EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.telegram_last_parsed))/3600
+        WHEN c.telegram_last_parsed IS NOT NULL THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - c.telegram_last_parsed))/3600
         ELSE NULL
     END as hours_since_parsed,
     CASE
-        WHEN c.telegram_table_name IS NOT NULL AND
-             EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = c.telegram_table_name) THEN
-            'Active'
-        WHEN c.telegram_table_name IS NOT NULL THEN
-            'Table Missing'
-        ELSE
-            'Not Parsed'
+        WHEN c.telegram_table_name IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = c.telegram_table_name) THEN 'Active'
+        WHEN c.telegram_table_name IS NOT NULL THEN 'Table Missing'
+        ELSE 'Not Parsed'
     END as status
 FROM cryptocurrencies c
-WHERE c.telegram_table_name IS NOT NULL
-   OR c.telegram_channels IS NOT NULL
+WHERE c.telegram_table_name IS NOT NULL OR c.telegram_channels IS NOT NULL
 ORDER BY c.telegram_last_parsed DESC NULLS LAST;
 
--- Представление для поиска активных Telegram каналов
+-- Представление: активные Telegram каналы
 CREATE OR REPLACE VIEW active_telegram_channels AS
 SELECT DISTINCT
     c.symbol,
@@ -276,11 +160,10 @@ SELECT DISTINCT
     c.telegram_message_count,
     c.telegram_last_parsed
 FROM cryptocurrencies c
-WHERE c.telegram_channels IS NOT NULL
-  AND array_length(c.telegram_channels, 1) > 0
+WHERE c.telegram_channels IS NOT NULL AND array_length(c.telegram_channels, 1) > 0
 ORDER BY c.telegram_message_count DESC;
 
--- Представление для криптовалют без социальных ссылок
+-- Представление: криптовалюты без социальных ссылок
 CREATE OR REPLACE VIEW crypto_without_social AS
 SELECT
     c.id,
@@ -292,126 +175,12 @@ SELECT
 FROM cryptocurrencies c
 WHERE
     c.coin_gecko_id IS NOT NULL AND
-    (
-        c.telegram_channels IS NULL OR array_length(c.telegram_channels, 1) = 0
-    ) AND
-    (
-        c.twitter_accounts IS NULL OR array_length(c.twitter_accounts, 1) = 0
-    ) AND
-    (
-        c.official_websites IS NULL OR array_length(c.official_websites, 1) = 0
-    )
+    (c.telegram_channels IS NULL OR array_length(c.telegram_channels, 1) = 0) AND
+    (c.twitter_accounts IS NULL OR array_length(c.twitter_accounts, 1) = 0) AND
+    (c.official_websites IS NULL OR array_length(c.official_websites, 1) = 0)
 ORDER BY c.market_cap DESC NULLS LAST;
 
--- Функция для анализа сообщений
-CREATE OR REPLACE FUNCTION analyze_telegram_message(message_text TEXT)
-RETURNS TABLE(
-    sentiment VARCHAR(20),
-    mentions_price BOOLEAN,
-    mentions_buy BOOLEAN,
-    mentions_sell BOOLEAN,
-    extracted_price NUMERIC,
-    extracted_percentage NUMERIC
-) AS $$
-DECLARE
-    text_lower TEXT;
-    price_match TEXT;
-    percentage_match TEXT;
-BEGIN
-    text_lower := lower(message_text);
-
-    -- Определение настроения
-    IF text_lower ~ '(moon|bullish|buy|pump|gem|profit|🚀|📈|💎)' THEN
-        sentiment := 'positive';
-    ELSIF text_lower ~ '(dump|sell|bearish|crash|scam|rug|📉|🔴)' THEN
-        sentiment := 'negative';
-    ELSE
-        sentiment := 'neutral';
-    END IF;
-
-    -- Проверка упоминаний
-    mentions_price := text_lower ~ '(price|цена|\$|usd|usdt)';
-    mentions_buy := text_lower ~ '(buy|купить|покупка|long)';
-    mentions_sell := text_lower ~ '(sell|продать|продажа|short)';
-
-    -- Извлечение цены
-    price_match := substring(message_text from '\$?\d+\.?\d*');
-    IF price_match IS NOT NULL THEN
-        extracted_price := regexp_replace(price_match, '[^0-9.]', '', 'g')::NUMERIC;
-    END IF;
-
-    -- Извлечение процентов
-    percentage_match := substring(message_text from '\d+\.?\d*%');
-    IF percentage_match IS NOT NULL THEN
-        extracted_percentage := regexp_replace(percentage_match, '[^0-9.]', '', 'g')::NUMERIC;
-    END IF;
-
-    RETURN QUERY SELECT sentiment, mentions_price, mentions_buy, mentions_sell, extracted_price, extracted_percentage;
-END;
-$$ LANGUAGE plpgsql;
-
--- Функция для получения последних сообщений монеты
-CREATE OR REPLACE FUNCTION get_latest_telegram_messages(
-    p_symbol VARCHAR,
-    p_limit INTEGER DEFAULT 10
-)
-RETURNS TABLE(
-    message_text TEXT,
-    message_date TIMESTAMP,
-    views INTEGER,
-    channel_name VARCHAR,
-    message_url VARCHAR
-) AS $$
-DECLARE
-    table_name VARCHAR;
-    query TEXT;
-BEGIN
-    -- Получаем имя таблицы
-    SELECT telegram_table_name INTO table_name
-    FROM cryptocurrencies
-    WHERE symbol = p_symbol;
-
-    IF table_name IS NULL THEN
-        RETURN;
-    END IF;
-
-    -- Динамический запрос
-    query := format('
-        SELECT message_text, message_date, views, channel_name, message_url
-        FROM %I
-        ORDER BY message_date DESC
-        LIMIT %s
-    ', table_name, p_limit);
-
-    RETURN QUERY EXECUTE query;
-END;
-$$ LANGUAGE plpgsql;
-
--- Функция для получения статистики upcoming проектов
-CREATE OR REPLACE FUNCTION get_upcoming_stats()
-RETURNS TABLE(
-    total_projects BIGINT,
-    active_projects BIGINT,
-    this_week BIGINT,
-    this_month BIGINT,
-    with_initial_cap BIGINT,
-    avg_moni_score NUMERIC
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        COUNT(*) as total_projects,
-        COUNT(CASE WHEN is_active = TRUE THEN 1 END) as active_projects,
-        COUNT(CASE WHEN launch_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' THEN 1 END) as this_week,
-        COUNT(CASE WHEN launch_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days' THEN 1 END) as this_month,
-        COUNT(CASE WHEN initial_cap IS NOT NULL AND initial_cap != '' THEN 1 END) as with_initial_cap,
-        ROUND(AVG(CASE WHEN moni_score ~ '^[0-9]+$' THEN moni_score::NUMERIC ELSE NULL END), 2) as avg_moni_score
-    FROM cryptorank_upcoming
-    WHERE is_active = TRUE;
-END;
-$$ LANGUAGE plpgsql;
-
--- Представление для поиска проблемных записей (обновлено)
+-- Представление: проблемы в данных
 CREATE OR REPLACE VIEW crypto_issues AS
 SELECT
     id,
@@ -439,48 +208,68 @@ WHERE name = 'Unknown'
    OR (social_links_updated IS NULL AND coin_gecko_id IS NOT NULL)
 ORDER BY added_date DESC;
 
--- Функция для статистики социальных ссылок
-CREATE OR REPLACE FUNCTION get_social_stats()
-RETURNS TABLE(
-    total_cryptos BIGINT,
-    with_telegram BIGINT,
-    with_twitter BIGINT,
-    with_discord BIGINT,
-    with_reddit BIGINT,
-    with_github BIGINT,
-    with_websites BIGINT,
-    with_any_social BIGINT,
-    avg_links_per_crypto NUMERIC
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        COUNT(*) as total_cryptos,
-        COUNT(CASE WHEN array_length(telegram_channels, 1) > 0 THEN 1 END) as with_telegram,
-        COUNT(CASE WHEN array_length(twitter_accounts, 1) > 0 THEN 1 END) as with_twitter,
-        COUNT(CASE WHEN array_length(discord_links, 1) > 0 THEN 1 END) as with_discord,
-        COUNT(CASE WHEN array_length(reddit_communities, 1) > 0 THEN 1 END) as with_reddit,
-        COUNT(CASE WHEN array_length(github_links, 1) > 0 THEN 1 END) as with_github,
-        COUNT(CASE WHEN array_length(official_websites, 1) > 0 THEN 1 END) as with_websites,
-        COUNT(CASE WHEN
-            array_length(telegram_channels, 1) > 0 OR
-            array_length(twitter_accounts, 1) > 0 OR
-            array_length(discord_links, 1) > 0 OR
-            array_length(reddit_communities, 1) > 0 OR
-            array_length(github_links, 1) > 0 OR
-            array_length(official_websites, 1) > 0 OR
-            array_length(instagram_accounts, 1) > 0
-        THEN 1 END) as with_any_social,
-        ROUND(AVG(
-            COALESCE(array_length(telegram_channels, 1), 0) +
-            COALESCE(array_length(twitter_accounts, 1), 0) +
-            COALESCE(array_length(discord_links, 1), 0) +
-            COALESCE(array_length(reddit_communities, 1), 0) +
-            COALESCE(array_length(github_links, 1), 0) +
-            COALESCE(array_length(official_websites, 1), 0) +
-            COALESCE(array_length(instagram_accounts, 1), 0)
-        ), 2) as avg_links_per_crypto
-    FROM cryptocurrencies
-    WHERE coin_gecko_id IS NOT NULL;
-END;
-$$ LANGUAGE plpgsql;
+-- Представление: tokenomics_summary
+CREATE OR REPLACE VIEW tokenomics_summary AS
+SELECT
+    t.id,
+    t.project_name,
+    t.tokenomics,
+    t.parsed_at,
+    t.updated_at,
+    t.tokenomics->'distribution' as distribution,
+    t.tokenomics->'initial_values' as initial_values,
+    t.tokenomics->'token_allocation' as token_allocation,
+    t.tokenomics->'source' as source,
+    t.tokenomics->'scraped_at' as scraped_at,
+    -- Извлекаем конкретные значения из distribution
+    (SELECT COUNT(*) FROM jsonb_object_keys(t.tokenomics->'distribution')) as distribution_categories_count,
+    -- Проверяем наличие ключевых данных
+    CASE
+        WHEN t.tokenomics->'distribution' IS NOT NULL AND jsonb_typeof(t.tokenomics->'distribution') = 'object' THEN true
+        ELSE false
+    END as has_distribution,
+    CASE
+        WHEN t.tokenomics->'initial_values' IS NOT NULL AND jsonb_typeof(t.tokenomics->'initial_values') = 'object' THEN true
+        ELSE false
+    END as has_initial_values,
+    CASE
+        WHEN t.tokenomics->'token_allocation' IS NOT NULL AND jsonb_typeof(t.tokenomics->'token_allocation') = 'object' THEN true
+        ELSE false
+    END as has_token_allocation
+FROM cryptorank_tokenomics t
+ORDER BY t.parsed_at DESC;
+
+-- Новое представление: детализированный анализ токеномики
+CREATE OR REPLACE VIEW tokenomics_detailed AS
+SELECT
+    t.project_name,
+    t.parsed_at,
+
+    -- Распределение токенов
+    t.tokenomics->'distribution' as distribution_data,
+
+    -- Начальные значения
+    t.tokenomics->'initial_values'->>'Total supply' as total_supply,
+    t.tokenomics->'initial_values'->>'Circulating supply' as circulating_supply,
+    t.tokenomics->'initial_values'->>'Max supply' as max_supply,
+    t.tokenomics->'initial_values'->>'Initial price' as initial_price,
+    t.tokenomics->'initial_values'->>'Market cap' as market_cap,
+
+    -- Аллокация токенов
+    t.tokenomics->'token_allocation' as allocation_data,
+
+    -- Статистика
+    (SELECT COUNT(*) FROM jsonb_object_keys(COALESCE(t.tokenomics->'distribution', '{}'::jsonb))) as categories_count,
+
+    -- Проверки качества данных
+    CASE
+        WHEN (SELECT COUNT(*) FROM jsonb_object_keys(COALESCE(t.tokenomics->'distribution', '{}'::jsonb))) > 0 THEN 'Complete'
+        WHEN t.tokenomics->'initial_values' IS NOT NULL THEN 'Partial'
+        ELSE 'Minimal'
+    END as data_quality
+
+FROM cryptorank_tokenomics t
+ORDER BY t.parsed_at DESC;
+
+-- Выводим информацию о созданных представлениях
+SELECT 'Views recreated successfully!' as status;
