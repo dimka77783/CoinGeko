@@ -1,0 +1,131 @@
+erDiagram
+    cryptocurrencies {
+        int id PK
+        string name
+        string symbol
+        string chain
+        date added_date
+        timestamp first_seen_at
+        string coin_gecko_id
+        string ohlc_table_name
+        string telegram_table_name
+        int telegram_message_count
+        timestamp telegram_last_parsed
+        text telegram_channels
+        text twitter_accounts
+        text discord_links
+        text reddit_communities
+        text github_links
+        text official_websites
+        text instagram_accounts
+        timestamp social_links_updated
+        timestamp last_updated_at
+        decimal market_cap
+    }
+
+    cryptorank_upcoming {
+        string project_name
+        string project_symbol
+        string project_type
+        decimal initial_cap
+        decimal ido_raise
+        date launch_date
+        string launch_date_original
+        int moni_score
+        timestamp parsed_at
+        timestamp updated_at
+        boolean is_active
+    }
+
+    cryptorank_tokenomics {
+        int id PK
+        string project_name
+        jsonb tokenomics
+        timestamp parsed_at
+        timestamp updated_at
+    }
+
+    crypto_stats {
+        int id
+        string name
+        string symbol
+        string chain
+        date added_date
+        date first_seen_date
+        int age_days
+        int days_in_db
+        string coin_gecko_id
+        int telegram_channels_count
+        int twitter_accounts_count
+        int websites_count
+        int ohlc_table_exists
+        int telegram_table_exists
+    }
+
+    upcoming_projects_stats {
+        string project_name
+        string project_symbol
+        string project_type
+        decimal initial_cap
+        decimal ido_raise
+        date launch_date
+        int moni_score
+        decimal days_until_launch
+        string launch_status
+    }
+
+    crypto_social_links {
+        int id
+        string symbol
+        string name
+        text telegram_channels
+        text twitter_accounts
+        text discord_links
+        text reddit_communities
+        text github_links
+        text official_websites
+        text instagram_accounts
+        int total_social_links
+        decimal hours_since_updated
+    }
+
+    telegram_stats {
+        string symbol
+        string name
+        string telegram_table_name
+        int telegram_message_count
+        text telegram_channels
+        timestamp telegram_last_parsed
+        decimal hours_since_parsed
+        string status
+    }
+
+    tokenomics_detailed {
+        string project_name
+        timestamp parsed_at
+        jsonb distribution_data
+        string total_supply
+        string circulating_supply
+        string max_supply
+        string initial_price
+        string market_cap
+        jsonb allocation_data
+        int categories_count
+        string data_quality
+    }
+
+    crypto_issues {
+        int id
+        string symbol
+        string name
+        string chain
+        date added_date
+        string issue
+    }
+
+    cryptocurrencies ||--o{ crypto_stats : "основа"
+    cryptocurrencies ||--o{ crypto_social_links : "основа"
+    cryptocurrencies ||--o{ telegram_stats : "основа"
+    cryptocurrencies ||--o{ crypto_issues : "основа"
+    cryptorank_upcoming ||--o{ upcoming_projects_stats : "основа"
+    cryptorank_tokenomics ||--o{ tokenomics_detailed : "основа"
